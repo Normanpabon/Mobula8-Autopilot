@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ELRS Telemetry | Mobula8</title>
+    <link rel="stylesheet" href="css/main.css">
+</head>
+<body>
+    <!-- Header -->
+    <header class="app-header">
+        <div class="header-left">
+            <div class="logo">MOBULA8</div>
+            <div class="session-info">ELRS Telemetry</div>
+        </div>
+        <div class="header-center">
+            <div class="connection-status" id="connectionStatus">
+                <span class="status-dot"></span>
+                <span id="statusText">CONNECTING</span>
+            </div>
+        </div>
+        <div class="header-right">
+            <div class="flight-mode" id="flightMode">DISARMED</div>
+        </div>
+    </header>
+
+    <!-- Main Grid -->
+    <main class="main-grid">
+        <!-- Left Panel: Horizon + Telemetry -->
+        <section class="left-panel">
+            <!-- Artificial Horizon -->
+            <div class="horizon-container">
+                <canvas id="horizonCanvas"></canvas>
+                <div class="horizon-overlay">
+                    <div class="attitude-values">
+                        <div class="value-item">
+                            <span class="label">PITCH</span>
+                            <span class="value" id="pitchValue">0.0°</span>
+                        </div>
+                        <div class="value-item">
+                            <span class="label">ROLL</span>
+                            <span class="value" id="rollValue">0.0°</span>
+                        </div>
+                        <div class="value-item">
+                            <span class="label">YAW</span>
+                            <span class="value" id="yawValue">0.0°</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Telemetry Panels -->
+            <div class="telemetry-panels">
+                <!-- Battery Widget -->
+                <div class="telem-card">
+                    <div class="card-header">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <rect x="2" y="7" width="18" height="12" rx="2"/>
+                            <path d="M22 11v2"/>
+                        </svg>
+                        <span>BATTERY</span>
+                    </div>
+                    <div class="card-body" id="batteryWidget">
+                        <div class="metric">
+                            <div class="metric-label">Voltage</div>
+                            <div class="metric-value" id="batteryVoltage">0.0V</div>
+                        </div>
+                        <div class="metric">
+                            <div class="metric-label">Current</div>
+                            <div class="metric-value" id="batteryCurrent">0.0A</div>
+                        </div>
+                        <div class="metric">
+                            <div class="metric-label">Capacity</div>
+                            <div class="metric-value" id="batteryCapacity">0mAh</div>
+                        </div>
+                        <div class="battery-bar">
+                            <div class="battery-fill" id="batteryFill" style="width: 0%"></div>
+                            <span class="battery-percent" id="batteryPercent">0%</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Link Stats Widget -->
+                <div class="telem-card">
+                    <div class="card-header">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M5 12.55a11 11 0 0 1 14.08 0"/>
+                            <path d="M1.42 9a16 16 0 0 1 21.16 0"/>
+                            <path d="M8.53 16.11a6 6 0 0 1 6.95 0"/>
+                            <circle cx="12" cy="20" r="1"/>
+                        </svg>
+                        <span>LINK</span>
+                    </div>
+                    <div class="card-body" id="linkWidget">
+                        <div class="metric">
+                            <div class="metric-label">RSSI (DN)</div>
+                            <div class="metric-value" id="linkRSSI">-120dBm</div>
+                        </div>
+                        <div class="metric">
+                            <div class="metric-label">Link Quality</div>
+                            <div class="metric-value" id="linkLQ">0%</div>
+                        </div>
+                        <div class="metric">
+                            <div class="metric-label">SNR</div>
+                            <div class="metric-value" id="linkSNR">0dB</div>
+                        </div>
+                        <div class="metric">
+                            <div class="metric-label">RF Mode</div>
+                            <div class="metric-value" id="linkRFMode">--</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Center Panel: Video Placeholder -->
+        <section class="center-panel">
+            <div class="video-placeholder">
+                <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M16 16v1a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h2m5.66 0H14a2 2 0 0 1 2 2v3.34l1 1L23 7v10"/>
+                    <line x1="1" y1="1" x2="23" y2="23"/>
+                </svg>
+                <h3>FPV Video Feed</h3>
+                <p>Video streaming will appear here</p>
+                <div class="video-info">
+                    <div class="info-item">
+                        <span class="label">Status:</span>
+                        <span class="value">Not connected</span>
+                    </div>
+                    <div class="info-item">
+                        <span class="label">Stream:</span>
+                        <span class="value">WebRTC / HLS</span>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Right Panel: Flight Log -->
+        <section class="right-panel">
+            <div class="flight-log">
+                <div class="log-header">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <polyline points="4 17 10 11 4 5"/>
+                        <line x1="12" y1="19" x2="20" y2="19"/>
+                    </svg>
+                    <span>FLIGHT LOG</span>
+                </div>
+                <div class="log-container" id="logContainer">
+                    <div class="log-empty">Waiting for telemetry...</div>
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <!-- Scripts -->
+    <script type="module" src="js/app.js"></script>
+</body>
+</html>

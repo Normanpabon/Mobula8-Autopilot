@@ -1,0 +1,538 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ELRS Logs | Mobula8</title>
+  <link rel="stylesheet" href="css/main.css">
+  <style>
+    /* ── Layout ── */
+    .logs-grid { display:grid; grid-template-columns:320px 1fr; gap:1px; background:var(--border-color); height:calc(100vh - 60px); }
+    .sidebar { background:var(--bg-secondary); display:flex; flex-direction:column; overflow:hidden; }
+    .main-area { background:var(--bg-primary); overflow-y:auto; padding:24px; }
+
+    /* ── Sidebar ── */
+    .sidebar-header { display:flex; align-items:center; justify-content:space-between; padding:16px; border-bottom:1px solid var(--border-color); }
+    .sidebar-title { font-family:var(--font-mono); font-size:11px; letter-spacing:2px; color:var(--text-accent); }
+    .session-count { font-family:var(--font-mono); font-size:11px; color:var(--text-secondary); }
+    .session-list { flex:1; overflow-y:auto; }
+    .session-item { padding:14px 16px; border-bottom:1px solid var(--border-color); cursor:pointer; transition:background .15s; }
+    .session-item:hover { background:rgba(255,255,255,.03); }
+    .session-item.active { background:rgba(0,229,255,.08); border-left:3px solid var(--text-accent); }
+    .session-item.live { border-left:3px solid var(--status-success); }
+    .session-date { font-family:var(--font-mono); font-size:12px; color:var(--text-primary); margin-bottom:4px; }
+    .session-meta { display:flex; gap:10px; font-family:var(--font-mono); font-size:11px; color:var(--text-secondary); }
+    .session-live-badge { font-size:10px; color:var(--status-success); font-family:var(--font-mono); letter-spacing:1px; }
+    .btn-delete { background:none; border:none; cursor:pointer; color:var(--text-secondary); font-size:14px; padding:2px 6px; border-radius:3px; }
+    .btn-delete:hover { color:var(--status-error); background:rgba(255,59,92,.1); }
+    .empty-list { padding:32px 16px; text-align:center; color:var(--text-secondary); font-family:var(--font-mono); font-size:12px; }
+
+    /* ── Main Area ── */
+    .no-selection { display:flex; flex-direction:column; align-items:center; justify-content:center; height:100%; gap:16px; color:var(--text-secondary); }
+    .no-selection h3 { font-family:var(--font-mono); color:var(--text-primary); }
+
+    /* ── Session Detail ── */
+    .detail-header { display:flex; align-items:flex-start; justify-content:space-between; margin-bottom:24px; flex-wrap:wrap; gap:16px; }
+    .detail-title { font-family:var(--font-mono); font-size:20px; color:var(--text-accent); letter-spacing:1px; }
+    .detail-subtitle { font-family:var(--font-mono); font-size:12px; color:var(--text-secondary); margin-top:4px; }
+    .detail-actions { display:flex; gap:8px; }
+    .btn { padding:8px 16px; border-radius:4px; font-family:var(--font-mono); font-size:11px; letter-spacing:1px; cursor:pointer; border:none; transition:all .15s; }
+    .btn-primary { background:rgba(0,229,255,.1); color:var(--text-accent); border:1px solid var(--text-accent); }
+    .btn-primary:hover { background:rgba(0,229,255,.2); }
+    .btn-danger { background:rgba(255,59,92,.1); color:var(--status-error); border:1px solid var(--status-error); }
+    .btn-danger:hover { background:rgba(255,59,92,.2); }
+
+    /* ── Stats Grid ── */
+    .stats-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(180px, 1fr)); gap:12px; margin-bottom:24px; }
+    .stat-card { background:var(--bg-secondary); border:1px solid var(--border-color); border-radius:6px; padding:16px; }
+    .stat-label { font-family:var(--font-mono); font-size:10px; letter-spacing:2px; color:var(--text-secondary); margin-bottom:8px; text-transform:uppercase; }
+    .stat-value { font-family:var(--font-mono); font-size:22px; font-weight:700; color:var(--text-primary); }
+    .stat-unit { font-size:12px; color:var(--text-secondary); }
+
+    /* ── Charts ── */
+    .charts-grid { display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-bottom:24px; }
+    .chart-card { background:var(--bg-secondary); border:1px solid var(--border-color); border-radius:6px; overflow:hidden; }
+    .chart-header { padding:12px 16px; border-bottom:1px solid var(--border-color); font-family:var(--font-mono); font-size:11px; letter-spacing:2px; color:var(--text-accent); }
+    .chart-body { padding:8px; }
+    canvas.chart { width:100%; height:160px; display:block; }
+
+    /* ── Horizon Playback ── */
+    .playback-card { background:var(--bg-secondary); border:1px solid var(--border-color); border-radius:6px; margin-bottom:24px; overflow:hidden; }
+    .playback-header { padding:12px 16px; border-bottom:1px solid var(--border-color); display:flex; align-items:center; justify-content:space-between; }
+    .playback-body { display:grid; grid-template-columns:280px 1fr; gap:1px; background:var(--border-color); }
+    .playback-horizon { background:#000; height:220px; position:relative; }
+    .playback-controls { background:var(--bg-primary); padding:16px; display:flex; flex-direction:column; gap:12px; }
+    .scrubber { width:100%; accent-color:var(--text-accent); cursor:pointer; }
+    .playback-btns { display:flex; gap:8px; }
+    .btn-sm { padding:6px 12px; font-size:10px; }
+    .playback-info { font-family:var(--font-mono); font-size:12px; color:var(--text-secondary); }
+    .playback-attitude { display:grid; grid-template-columns:1fr 1fr 1fr; gap:8px; }
+    .att-item { background:var(--bg-secondary); border:1px solid var(--border-color); border-radius:4px; padding:8px; text-align:center; }
+    .att-label { font-family:var(--font-mono); font-size:10px; color:var(--text-secondary); }
+    .att-value { font-family:var(--font-mono); font-size:16px; font-weight:700; color:var(--text-primary); }
+
+    /* ── Nav ── */
+    .nav-link { font-family:var(--font-mono); font-size:12px; color:var(--text-secondary); text-decoration:none; padding:6px 12px; border:1px solid var(--border-color); border-radius:4px; transition:all .15s; }
+    .nav-link:hover { color:var(--text-accent); border-color:var(--text-accent); }
+
+    @media (max-width:900px) {
+      .logs-grid { grid-template-columns:1fr; grid-template-rows:auto 1fr; }
+      .charts-grid { grid-template-columns:1fr; }
+      .playback-body { grid-template-columns:1fr; }
+    }
+  </style>
+</head>
+<body>
+  <header class="app-header">
+    <div class="header-left">
+      <div class="logo">MOBULA8</div>
+      <div class="session-info">Flight Logs</div>
+    </div>
+    <div class="header-center">
+      <div class="connection-status connecting" id="connectionStatus">
+        <span class="status-dot"></span><span id="statusText">LOADING</span>
+      </div>
+    </div>
+    <div class="header-right">
+      <a href="/" class="nav-link">◄ Live View</a>
+    </div>
+  </header>
+
+  <div class="logs-grid">
+    <!-- Sidebar: lista de sesiones -->
+    <aside class="sidebar">
+      <div class="sidebar-header">
+        <span class="sidebar-title">SESSIONS</span>
+        <span class="session-count" id="sessionCount">0 sessions</span>
+      </div>
+      <div class="session-list" id="sessionList">
+        <div class="empty-list">Loading sessions...</div>
+      </div>
+    </aside>
+
+    <!-- Main: detalle de sesión -->
+    <main class="main-area" id="mainArea">
+      <div class="no-selection">
+        <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+          <polyline points="14 2 14 8 20 8"/>
+          <line x1="16" y1="13" x2="8" y2="13"/>
+          <line x1="16" y1="17" x2="8" y2="17"/>
+          <polyline points="10 9 9 9 8 9"/>
+        </svg>
+        <h3>Select a session</h3>
+        <p>Choose a flight session from the left panel</p>
+      </div>
+    </main>
+  </div>
+
+  <script type="module">
+    import { HorizonCanvas } from './js/modules/HorizonCanvas.js';
+
+    // ── State ──────────────────────────────────────
+    let sessions   = [];
+    let current    = null;
+    let activeId   = null;
+    let fullData   = null;
+    let attFrames  = [];
+    let playTimer  = null;
+    let playIdx    = 0;
+    let horizon    = null;
+    const API      = '/api/sessions';
+
+    // ── Init ────────────────────────────────────────
+    async function init() {
+      await loadSessions();
+      setInterval(loadSessions, 10000); // refresh cada 10s
+    }
+
+    // ── Load session list ───────────────────────────
+    async function loadSessions() {
+      try {
+        const r    = await fetch(API);
+        const data = await r.json();
+        sessions   = data.sessions || [];
+        current    = data.current  || null;
+        renderSidebar();
+        setStatus('connected', `${sessions.length} sessions`);
+      } catch(e) {
+        setStatus('disconnected', 'Backend offline');
+      }
+    }
+
+    // ── Render sidebar ──────────────────────────────
+    function renderSidebar() {
+      const list  = document.getElementById('sessionList');
+      const count = document.getElementById('sessionCount');
+      const total = sessions.length + (current ? 1 : 0);
+      count.textContent = `${total} session${total !== 1 ? 's' : ''}`;
+
+      let html = '';
+
+      // Sesión en vivo
+      if (current) {
+        const dur = fmtDuration(current.summary.duration_seconds || 0);
+        html += `
+          <div class="session-item live ${activeId === current.session_id ? 'active' : ''}"
+               onclick="selectSession('${current.session_id}', true)">
+            <div class="session-date">
+              <span class="session-live-badge">● LIVE </span>
+              ${fmtDate(current.start_time)}
+            </div>
+            <div class="session-meta">
+              <span>${current.summary.total_frames} frames</span>
+              <span>${dur}</span>
+            </div>
+          </div>`;
+      }
+
+      // Sesiones guardadas
+      if (sessions.length === 0 && !current) {
+        html = '<div class="empty-list">No sessions yet.<br>Fly to generate data.</div>';
+      } else {
+        sessions.forEach(s => {
+          const dur     = fmtDuration(s.summary.duration_seconds || 0);
+          const frames  = s.summary.total_frames || 0;
+          const voltage = s.summary.max_voltage ? `${s.summary.max_voltage.toFixed(1)}V` : '';
+          html += `
+            <div class="session-item ${activeId === s.session_id ? 'active' : ''}"
+                 onclick="selectSession('${s.session_id}', false)">
+              <div style="display:flex; justify-content:space-between; align-items:center;">
+                <div class="session-date">${fmtDate(s.start_time)}</div>
+                <button class="btn-delete" onclick="event.stopPropagation(); deleteSession('${s.session_id}')" title="Delete">✕</button>
+              </div>
+              <div class="session-meta">
+                <span>${frames} frames</span>
+                <span>${dur}</span>
+                ${voltage ? `<span>${voltage}</span>` : ''}
+                <span>${(s.size_kb || 0).toFixed(0)} KB</span>
+              </div>
+            </div>`;
+        });
+      }
+
+      list.innerHTML = html;
+    }
+
+    // ── Select session ──────────────────────────────
+    window.selectSession = async function(id, live) {
+      activeId = id;
+      renderSidebar();
+      stopPlayback();
+
+      document.getElementById('mainArea').innerHTML =
+        '<div class="no-selection"><div class="empty-list">Loading session...</div></div>';
+
+      try {
+        const r   = live
+          ? await fetch('/api/history?limit=500')
+          : await fetch(`${API}/${id}`);
+        fullData  = await r.json();
+        const frames = live ? fullData.frames : fullData.frames;
+        renderDetail(fullData, frames, live);
+      } catch(e) {
+        document.getElementById('mainArea').innerHTML =
+          '<div class="no-selection"><h3>Error loading session</h3></div>';
+      }
+    };
+
+    // ── Delete session ──────────────────────────────
+    window.deleteSession = async function(id) {
+      if (!confirm('Delete this session?')) return;
+      await fetch(`${API}/${id}`, { method: 'DELETE' });
+      if (activeId === id) {
+        activeId = null;
+        document.getElementById('mainArea').innerHTML = '<div class="no-selection"><h3>Session deleted</h3></div>';
+      }
+      await loadSessions();
+    };
+
+    // ── Render detail ───────────────────────────────
+    function renderDetail(doc, frames, live) {
+      const s       = live ? buildLiveSummary(frames) : doc.summary;
+      const title   = live ? `LIVE — ${fmtDate(doc.frames?.[0]?.timestamp || new Date())}` : `SESSION ${doc.session_id}`;
+      const dur     = fmtDuration(s.duration_seconds || 0);
+      attFrames     = frames.filter(f => f.type === 'attitude');
+      const batFrames = frames.filter(f => f.type === 'battery');
+      const lnkFrames = frames.filter(f => f.type === 'link');
+
+      document.getElementById('mainArea').innerHTML = `
+        <div class="detail-header">
+          <div>
+            <div class="detail-title">${title}</div>
+            <div class="detail-subtitle">${fmtDate(doc.start_time || frames[0]?.timestamp)} · ${dur} · ${frames.length} frames</div>
+          </div>
+          <div class="detail-actions">
+            ${!live ? `<button class="btn btn-primary" onclick="exportJSON('${doc.session_id}')">⤓ Export JSON</button>` : ''}
+          </div>
+        </div>
+
+        <!-- Stats -->
+        <div class="stats-grid">
+          <div class="stat-card">
+            <div class="stat-label">Max Voltage</div>
+            <div class="stat-value">${(s.max_voltage||0).toFixed(1)}<span class="stat-unit">V</span></div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">Min Voltage</div>
+            <div class="stat-value">${(s.min_voltage||0).toFixed(1)}<span class="stat-unit">V</span></div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">Max Current</div>
+            <div class="stat-value">${(s.max_current||0).toFixed(1)}<span class="stat-unit">A</span></div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">mAh Used</div>
+            <div class="stat-value">${Math.round(s.total_mah||0)}<span class="stat-unit">mAh</span></div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">Min Battery</div>
+            <div class="stat-value">${s.min_battery_pct||0}<span class="stat-unit">%</span></div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">Avg RSSI</div>
+            <div class="stat-value">${(s.avg_rssi||0).toFixed(0)}<span class="stat-unit">dBm</span></div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">Min LQ</div>
+            <div class="stat-value">${s.min_lq||0}<span class="stat-unit">%</span></div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">Total Frames</div>
+            <div class="stat-value">${s.total_frames||frames.length}<span class="stat-unit"></span></div>
+          </div>
+        </div>
+
+        <!-- Charts -->
+        <div class="charts-grid">
+          <div class="chart-card">
+            <div class="chart-header">VOLTAGE OVER TIME</div>
+            <div class="chart-body"><canvas class="chart" id="chartVoltage"></canvas></div>
+          </div>
+          <div class="chart-card">
+            <div class="chart-header">CURRENT OVER TIME</div>
+            <div class="chart-body"><canvas class="chart" id="chartCurrent"></canvas></div>
+          </div>
+          <div class="chart-card">
+            <div class="chart-header">RSSI OVER TIME</div>
+            <div class="chart-body"><canvas class="chart" id="chartRSSI"></canvas></div>
+          </div>
+          <div class="chart-card">
+            <div class="chart-header">LINK QUALITY OVER TIME</div>
+            <div class="chart-body"><canvas class="chart" id="chartLQ"></canvas></div>
+          </div>
+        </div>
+
+        <!-- Attitude Playback -->
+        ${attFrames.length > 0 ? `
+        <div class="playback-card">
+          <div class="playback-header">
+            <span style="font-family:var(--font-mono);font-size:11px;letter-spacing:2px;color:var(--text-accent)">ATTITUDE PLAYBACK</span>
+            <span style="font-family:var(--font-mono);font-size:11px;color:var(--text-secondary)">${attFrames.length} attitude frames</span>
+          </div>
+          <div class="playback-body">
+            <div class="playback-horizon">
+              <canvas id="playbackCanvas" style="width:100%;height:100%;display:block"></canvas>
+            </div>
+            <div class="playback-controls">
+              <input type="range" class="scrubber" id="scrubber" min="0" max="${attFrames.length-1}" value="0">
+              <div class="playback-btns">
+                <button class="btn btn-primary btn-sm" id="btnPlay" onclick="togglePlay()">▶ Play</button>
+                <button class="btn btn-sm" onclick="seekTo(0)" style="background:rgba(255,255,255,.05);border:1px solid var(--border-color);color:var(--text-primary)">⏮ Reset</button>
+              </div>
+              <div class="playback-info" id="playbackInfo">Frame 0 / ${attFrames.length}</div>
+              <div class="playback-attitude">
+                <div class="att-item"><div class="att-label">PITCH</div><div class="att-value" id="pbPitch">0.0°</div></div>
+                <div class="att-item"><div class="att-label">ROLL</div><div class="att-value" id="pbRoll">0.0°</div></div>
+                <div class="att-item"><div class="att-label">YAW</div><div class="att-value" id="pbYaw">0.0°</div></div>
+              </div>
+            </div>
+          </div>
+        </div>` : ''}
+      `;
+
+      // Renderizar gráficas
+      setTimeout(() => {
+        drawChart('chartVoltage', batFrames, f => f.data.voltage, '#00e5ff', 3, 9);
+        drawChart('chartCurrent', batFrames, f => f.data.current, '#ffcc00', 0, null);
+        drawChart('chartRSSI', lnkFrames, f => f.data.rssi1, '#ff3b5c', -120, -40);
+        drawChart('chartLQ', lnkFrames, f => f.data.lq, '#00ff88', 0, 100);
+        if (attFrames.length > 0) initPlayback();
+      }, 50);
+    }
+
+    // ── Chart renderer (Canvas 2D) ──────────────────
+    function drawChart(canvasId, frames, valueFn, color, yMin, yMax) {
+      const canvas = document.getElementById(canvasId);
+      if (!canvas || frames.length === 0) return;
+
+      const dpr = window.devicePixelRatio || 1;
+      const W   = canvas.offsetWidth;
+      const H   = canvas.offsetHeight;
+      canvas.width  = W * dpr;
+      canvas.height = H * dpr;
+      const ctx = canvas.getContext('2d');
+      ctx.scale(dpr, dpr);
+
+      const pad    = { top:10, right:16, bottom:24, left:44 };
+      const iW     = W - pad.left - pad.right;
+      const iH     = H - pad.top  - pad.bottom;
+      const values = frames.map(valueFn);
+      const min    = yMin !== null ? yMin : Math.min(...values);
+      const max    = yMax !== null ? yMax : Math.max(...values);
+      const range  = max - min || 1;
+
+      // Background
+      ctx.fillStyle = '#0a0c10';
+      ctx.fillRect(0, 0, W, H);
+
+      // Grid lines
+      ctx.strokeStyle = 'rgba(255,255,255,0.05)';
+      ctx.lineWidth   = 1;
+      for (let i = 0; i <= 4; i++) {
+        const y = pad.top + iH - (i / 4) * iH;
+        ctx.beginPath(); ctx.moveTo(pad.left, y); ctx.lineTo(pad.left + iW, y); ctx.stroke();
+        // Y label
+        const val = min + (i / 4) * range;
+        ctx.fillStyle = 'rgba(255,255,255,0.3)';
+        ctx.font      = `${9 * dpr / dpr}px monospace`;
+        ctx.textAlign = 'right';
+        ctx.fillText(val.toFixed(1), pad.left - 4, y + 4);
+      }
+
+      // Line
+      if (frames.length < 2) return;
+      ctx.beginPath();
+      ctx.strokeStyle = color;
+      ctx.lineWidth   = 1.5;
+      ctx.lineJoin    = 'round';
+      frames.forEach((f, i) => {
+        const v = valueFn(f);
+        const x = pad.left + (i / (frames.length - 1)) * iW;
+        const y = pad.top  + iH - ((v - min) / range) * iH;
+        i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+      });
+      ctx.stroke();
+
+      // Fill under line
+      ctx.lineTo(pad.left + iW, pad.top + iH);
+      ctx.lineTo(pad.left, pad.top + iH);
+      ctx.closePath();
+      ctx.fillStyle = color + '18';
+      ctx.fill();
+    }
+
+    // ── Playback ─────────────────────────────────────
+    function initPlayback() {
+      const canvas = document.getElementById('playbackCanvas');
+      if (!canvas) return;
+      const rect   = canvas.getBoundingClientRect();
+      canvas.width  = rect.width  || 280;
+      canvas.height = rect.height || 220;
+
+      try {
+        horizon = new HorizonCanvas('playbackCanvas');
+        horizon.start();
+      } catch(e) { console.warn('[Playback] Horizon init error:', e); }
+
+      const scrubber = document.getElementById('scrubber');
+      scrubber.addEventListener('input', () => {
+        stopPlayback();
+        seekTo(parseInt(scrubber.value));
+      });
+
+      seekTo(0);
+    }
+
+    function seekTo(idx) {
+      playIdx = Math.max(0, Math.min(idx, attFrames.length - 1));
+      const f = attFrames[playIdx];
+      if (!f) return;
+      const { pitch, roll, yaw } = f.data;
+      if (horizon) horizon.update(pitch, roll, yaw);
+      document.getElementById('pbPitch').textContent = `${pitch.toFixed(1)}°`;
+      document.getElementById('pbRoll').textContent  = `${roll.toFixed(1)}°`;
+      document.getElementById('pbYaw').textContent   = `${yaw.toFixed(1)}°`;
+      document.getElementById('playbackInfo').textContent = `Frame ${playIdx + 1} / ${attFrames.length}`;
+      const scrubber = document.getElementById('scrubber');
+      if (scrubber) scrubber.value = playIdx;
+    }
+
+    window.togglePlay = function() {
+      if (playTimer) { stopPlayback(); return; }
+      document.getElementById('btnPlay').textContent = '⏸ Pause';
+      playTimer = setInterval(() => {
+        if (playIdx >= attFrames.length - 1) { stopPlayback(); return; }
+        seekTo(playIdx + 1);
+      }, 100); // 10 fps playback
+    };
+
+    function stopPlayback() {
+      if (playTimer) { clearInterval(playTimer); playTimer = null; }
+      const btn = document.getElementById('btnPlay');
+      if (btn) btn.textContent = '▶ Play';
+    }
+
+    // ── Export ──────────────────────────────────────
+    window.exportJSON = async function(id) {
+      const r    = await fetch(`${API}/${id}`);
+      const data = await r.json();
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+      const url  = URL.createObjectURL(blob);
+      const a    = document.createElement('a');
+      a.href     = url;
+      a.download = `session_${id}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+    };
+
+    // ── Live summary from frames ─────────────────────
+    function buildLiveSummary(frames) {
+      const s = { total_frames: frames.length, max_voltage: 0, min_voltage: 99,
+                  max_current: 0, total_mah: 0, min_battery_pct: 100,
+                  avg_rssi: 0, min_lq: 100, duration_seconds: 0 };
+      let rssiSum = 0, rssiCount = 0;
+      frames.forEach(f => {
+        if (f.type === 'battery') {
+          const d = f.data;
+          s.max_voltage     = Math.max(s.max_voltage, d.voltage || 0);
+          s.min_voltage     = Math.min(s.min_voltage, d.voltage || 99);
+          s.max_current     = Math.max(s.max_current, d.current || 0);
+          s.total_mah       = Math.max(s.total_mah, d.mah_used || 0);
+          s.min_battery_pct = Math.min(s.min_battery_pct, d.percent || 100);
+        }
+        if (f.type === 'link') {
+          rssiSum += f.data.rssi1 || 0; rssiCount++;
+          s.min_lq = Math.min(s.min_lq, f.data.lq || 100);
+        }
+      });
+      if (s.min_voltage === 99) s.min_voltage = 0;
+      if (rssiCount) s.avg_rssi = rssiSum / rssiCount;
+      return s;
+    }
+
+    // ── Helpers ─────────────────────────────────────
+    function fmtDate(iso) {
+      if (!iso) return '—';
+      const d = new Date(iso);
+      return d.toLocaleDateString() + ' ' + d.toLocaleTimeString();
+    }
+
+    function fmtDuration(seconds) {
+      if (!seconds) return '0s';
+      const m = Math.floor(seconds / 60);
+      const s = Math.floor(seconds % 60);
+      return m > 0 ? `${m}m ${s}s` : `${s}s`;
+    }
+
+    function setStatus(state, text) {
+      const el = document.getElementById('connectionStatus');
+      const tx = document.getElementById('statusText');
+      el.className   = `connection-status ${state}`;
+      tx.textContent = text.toUpperCase();
+    }
+
+    init();
+  </script>
+</body>
+</html>
