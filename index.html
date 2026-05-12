@@ -1,0 +1,392 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ELRS Telemetry | Mobula8</title>
+    <link rel="stylesheet" href="css/main.css">
+    <style>
+        /* ── Video Panel ── */
+        .center-panel { position: relative; }
+
+        .video-placeholder {
+            position: absolute; inset: 0;
+            display: flex; flex-direction: column;
+            align-items: center; justify-content: center;
+            gap: 12px; padding: 24px; text-align: center;
+            background: #000;
+        }
+        .video-placeholder svg  { stroke: #2d3748; }
+        .video-placeholder h3   { font-family: var(--font-mono); font-size: 16px; color: #4a5568; margin: 0; }
+        .video-placeholder p    { font-size: 12px; color: #2d3748; margin: 0; }
+
+        /* ── Video Controls ── */
+        .video-controls {
+            position: absolute; bottom: 0; left: 0; right: 0;
+            display: flex; align-items: center; gap: 8px;
+            padding: 10px 14px;
+            background: linear-gradient(transparent, rgba(0,0,0,.85));
+            flex-wrap: wrap;
+        }
+        .vc-group { display: flex; align-items: center; gap: 6px; }
+        .vc-status-group { margin-left: auto; }
+
+        .vc-select {
+            background: rgba(255,255,255,.07);
+            border: 1px solid #1e2535;
+            color: var(--text-primary);
+            font-family: var(--font-mono);
+            font-size: 11px;
+            padding: 5px 8px;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        .vc-select:focus { outline: none; border-color: var(--text-accent); }
+
+        .vc-btn {
+            font-family: var(--font-mono);
+            font-size: 11px;
+            letter-spacing: 1px;
+            padding: 6px 14px;
+            border-radius: 4px;
+            border: none;
+            cursor: pointer;
+            transition: all .15s;
+        }
+        .vc-btn:disabled { opacity: .4; cursor: not-allowed; }
+        .vc-btn-primary  { background: rgba(0,229,255,.12); color: var(--text-accent); border: 1px solid var(--text-accent); }
+        .vc-btn-primary:hover:not(:disabled)  { background: rgba(0,229,255,.25); }
+        .vc-btn-primary.active  { background: rgba(255,59,92,.12); color: var(--status-error); border-color: var(--status-error); }
+        .vc-btn-danger   { background: rgba(255,59,92,.12); color: var(--status-error); border: 1px solid var(--status-error); }
+        .vc-btn-danger:hover:not(:disabled)   { background: rgba(255,59,92,.25); }
+        .vc-btn-danger.recording { background: rgba(255,59,92,.3); animation: blink .8s ease-in-out infinite; }
+
+        @keyframes blink { 0%,100%{opacity:1} 50%{opacity:.5} }
+
+        .vc-badge {
+            font-family: var(--font-mono); font-size: 10px;
+            letter-spacing: 2px; padding: 4px 10px;
+            border-radius: 4px; font-weight: 700;
+        }
+        .vc-badge.idle        { background: rgba(255,255,255,.05); color: #4a5568; }
+        .vc-badge.connecting  { background: rgba(255,204,0,.1);    color: var(--status-warning); }
+        .vc-badge.connected   { background: rgba(0,255,136,.1);    color: var(--status-success); }
+        .vc-badge.error       { background: rgba(255,59,92,.1);    color: var(--status-error); }
+
+        .vc-rec-timer {
+            font-family: var(--font-mono); font-size: 12px;
+            color: var(--status-error); letter-spacing: 1px;
+        }
+    </style>
+</head>
+<body>
+    <!-- Header -->
+    <header class="app-header">
+        <div class="header-left">
+            <div class="logo">MOBULA8</div>
+            <div class="session-info">ELRS Telemetry</div>
+        </div>
+        <div class="header-center">
+            <div class="connection-status" id="connectionStatus">
+                <span class="status-dot"></span>
+                <span id="statusText">CONNECTING</span>
+            </div>
+        </div>
+        <div class="header-right">
+            <a href="/logs.html" style="font-family:var(--font-mono);font-size:11px;color:var(--text-secondary);text-decoration:none;padding:6px 12px;border:1px solid var(--border-color);border-radius:4px;letter-spacing:1px;" onmouseover="this.style.color='var(--text-accent)';this.style.borderColor='var(--text-accent)'" onmouseout="this.style.color='var(--text-secondary)';this.style.borderColor='var(--border-color)'">⊞ LOGS</a>
+            <div class="flight-mode" id="flightMode">DISARMED</div>
+        </div>
+    </header>
+
+    <!-- Main Grid -->
+    <main class="main-grid">
+        <!-- Left Panel: Horizon + Telemetry -->
+        <section class="left-panel">
+            <!-- Artificial Horizon -->
+            <div class="horizon-container">
+                <canvas id="horizonCanvas"></canvas>
+                <div class="horizon-overlay">
+                    <div class="attitude-values">
+                        <div class="value-item">
+                            <span class="label">PITCH</span>
+                            <span class="value" id="pitchValue">0.0°</span>
+                        </div>
+                        <div class="value-item">
+                            <span class="label">ROLL</span>
+                            <span class="value" id="rollValue">0.0°</span>
+                        </div>
+                        <div class="value-item">
+                            <span class="label">YAW</span>
+                            <span class="value" id="yawValue">0.0°</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Telemetry Panels -->
+            <div class="telemetry-panels">
+                <!-- Battery Widget -->
+                <div class="telem-card">
+                    <div class="card-header">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <rect x="2" y="7" width="18" height="12" rx="2"/>
+                            <path d="M22 11v2"/>
+                        </svg>
+                        <span>BATTERY</span>
+                    </div>
+                    <div class="card-body" id="batteryWidget">
+                        <div class="metric">
+                            <div class="metric-label">Voltage</div>
+                            <div class="metric-value" id="batteryVoltage">0.0V</div>
+                        </div>
+                        <div class="metric">
+                            <div class="metric-label">Current</div>
+                            <div class="metric-value" id="batteryCurrent">0.0A</div>
+                        </div>
+                        <div class="metric">
+                            <div class="metric-label">Capacity</div>
+                            <div class="metric-value" id="batteryCapacity">0mAh</div>
+                        </div>
+                        <div class="battery-bar">
+                            <div class="battery-fill" id="batteryFill" style="width: 0%"></div>
+                            <span class="battery-percent" id="batteryPercent">0%</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Link Stats Widget -->
+                <div class="telem-card">
+                    <div class="card-header">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M5 12.55a11 11 0 0 1 14.08 0"/>
+                            <path d="M1.42 9a16 16 0 0 1 21.16 0"/>
+                            <path d="M8.53 16.11a6 6 0 0 1 6.95 0"/>
+                            <circle cx="12" cy="20" r="1"/>
+                        </svg>
+                        <span>LINK</span>
+                    </div>
+                    <div class="card-body" id="linkWidget">
+                        <div class="metric">
+                            <div class="metric-label">RSSI (DN)</div>
+                            <div class="metric-value" id="linkRSSI">-120dBm</div>
+                        </div>
+                        <div class="metric">
+                            <div class="metric-label">Link Quality</div>
+                            <div class="metric-value" id="linkLQ">0%</div>
+                        </div>
+                        <div class="metric">
+                            <div class="metric-label">SNR</div>
+                            <div class="metric-value" id="linkSNR">0dB</div>
+                        </div>
+                        <div class="metric">
+                            <div class="metric-label">RF Mode</div>
+                            <div class="metric-value" id="linkRFMode">--</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Center Panel: FPV Video (WebRTC) -->
+        <section class="center-panel" id="centerPanel">
+            <!-- Video element -->
+            <video id="fpvVideo" autoplay playsinline muted
+                   style="width:100%;height:100%;object-fit:contain;background:#000;display:none;"></video>
+
+            <!-- Overlay cuando no hay stream -->
+            <div class="video-placeholder" id="videoPlaceholder">
+                <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                    <path d="M16 16v1a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h2m5.66 0H14a2 2 0 0 1 2 2v3.34l1 1L23 7v10"/>
+                    <line x1="1" y1="1" x2="23" y2="23"/>
+                </svg>
+                <h3 id="videoStatusText">FPV Video</h3>
+                <p id="videoStatusSub">Configure and start the video stream</p>
+            </div>
+
+            <!-- Video Controls Bar -->
+            <div class="video-controls" id="videoControls">
+                <!-- Device selector -->
+                <div class="vc-group">
+                    <select id="deviceSelect" class="vc-select" title="Capture device">
+                        <option value="0">Device 0</option>
+                    </select>
+                    <select id="resSelect" class="vc-select" title="Resolution">
+                        <option value="1280x720">720p</option>
+                        <option value="1920x1080">1080p</option>
+                        <option value="640x480">480p</option>
+                    </select>
+                </div>
+
+                <!-- Stream control -->
+                <div class="vc-group">
+                    <button id="btnStream" class="vc-btn vc-btn-primary" onclick="videoToggle()">
+                        ▶ Start Stream
+                    </button>
+                </div>
+
+                <!-- Recording control -->
+                <div class="vc-group">
+                    <button id="btnRecord" class="vc-btn vc-btn-danger" onclick="recordToggle()" disabled>
+                        ⏺ Record
+                    </button>
+                    <span class="vc-rec-timer" id="recTimer" style="display:none">⏺ 00:00</span>
+                </div>
+
+                <!-- Stream status -->
+                <div class="vc-group vc-status-group">
+                    <span class="vc-badge" id="vcBadge">IDLE</span>
+                </div>
+            </div>
+        </section>
+
+        <!-- Right Panel: Flight Log -->
+        <section class="right-panel">
+            <div class="flight-log">
+                <div class="log-header">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <polyline points="4 17 10 11 4 5"/>
+                        <line x1="12" y1="19" x2="20" y2="19"/>
+                    </svg>
+                    <span>FLIGHT LOG</span>
+                </div>
+                <div class="log-container" id="logContainer">
+                    <div class="log-empty">Waiting for telemetry...</div>
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <!-- Scripts -->
+    <script type="module" src="js/app.js"></script>
+    <script type="module">
+        import { VideoPlayer } from './js/modules/VideoPlayer.js';
+
+        // ── State ──────────────────────────────────
+        let player      = null;
+        let recInterval = null;
+        let recSeconds  = 0;
+        let streaming   = false;
+
+        // ── Init ───────────────────────────────────
+        async function initVideo() {
+            const videoEl = document.getElementById('fpvVideo');
+            player = new VideoPlayer(videoEl, {
+                onStateChange: updateVideoUI,
+                onError:       (msg) => console.error('[VideoPlayer]', msg),
+            });
+
+            // Cargar dispositivos disponibles
+            await loadDevices();
+        }
+
+        async function loadDevices() {
+            try {
+                const devices = await player.getDevices();
+                const sel     = document.getElementById('deviceSelect');
+                sel.innerHTML = devices.length > 0
+                    ? devices.map(d => `<option value="${d.id}">${d.name} (${d.width}x${d.height})</option>`).join('')
+                    : '<option value="0">Device 0 (default)</option>';
+            } catch (_) {
+                // Backend sin módulo de video o sin iniciar
+            }
+        }
+
+        // ── Stream toggle ───────────────────────────
+        window.videoToggle = async function () {
+            if (!player) return;
+
+            if (streaming) {
+                // Detener
+                if (player.recording) await recordToggle();
+                await player.disconnect();
+                streaming = false;
+                document.getElementById('fpvVideo').style.display       = 'none';
+                document.getElementById('videoPlaceholder').style.display = '';
+            } else {
+                // Iniciar
+                const [w, h] = document.getElementById('resSelect').value.split('x').map(Number);
+                const device = parseInt(document.getElementById('deviceSelect').value);
+                streaming = true;
+                await player.connect({ device_id: device, width: w, height: h, fps: 30 });
+            }
+        };
+
+        // ── Record toggle ───────────────────────────
+        window.recordToggle = async function () {
+            if (!player || !streaming) return;
+
+            if (player.recording) {
+                await player.stopRecording();
+                clearInterval(recInterval);
+                recInterval = null;
+                document.getElementById('recTimer').style.display = 'none';
+            } else {
+                await player.startRecording();
+                recSeconds  = 0;
+                recInterval = setInterval(() => {
+                    recSeconds++;
+                    const m = String(Math.floor(recSeconds / 60)).padStart(2, '0');
+                    const s = String(recSeconds % 60).padStart(2, '0');
+                    document.getElementById('recTimer').textContent = `⏺ ${m}:${s}`;
+                }, 1000);
+                document.getElementById('recTimer').style.display = '';
+            }
+        };
+
+        // ── Update UI ───────────────────────────────
+        function updateVideoUI({ state, recording }) {
+            const badge    = document.getElementById('vcBadge');
+            const btnStr   = document.getElementById('btnStream');
+            const btnRec   = document.getElementById('btnRecord');
+            const videoEl  = document.getElementById('fpvVideo');
+            const placeholder = document.getElementById('videoPlaceholder');
+            const statusTxt   = document.getElementById('videoStatusText');
+            const statusSub   = document.getElementById('videoStatusSub');
+
+            // Badge
+            badge.className  = `vc-badge ${state}`;
+            badge.textContent = state.toUpperCase();
+
+            // Stream button
+            if (state === 'connecting') {
+                btnStr.textContent = '⏳ Connecting...';
+                btnStr.disabled    = true;
+                btnStr.className   = 'vc-btn vc-btn-primary';
+            } else if (state === 'connected') {
+                btnStr.textContent = '■ Stop Stream';
+                btnStr.disabled    = false;
+                btnStr.className   = 'vc-btn vc-btn-primary active';
+                btnRec.disabled    = false;
+                videoEl.style.display       = 'block';
+                placeholder.style.display   = 'none';
+            } else if (state === 'error') {
+                btnStr.textContent = '▶ Retry';
+                btnStr.disabled    = false;
+                btnStr.className   = 'vc-btn vc-btn-primary';
+                statusTxt.textContent = 'Connection Error';
+                statusSub.textContent = 'Check that the capture device is connected';
+                placeholder.style.display   = '';
+                videoEl.style.display       = 'none';
+                btnRec.disabled = true;
+            } else {
+                btnStr.textContent = '▶ Start Stream';
+                btnStr.disabled    = false;
+                btnStr.className   = 'vc-btn vc-btn-primary';
+                btnRec.disabled    = true;
+            }
+
+            // Record button
+            if (recording) {
+                btnRec.textContent = '⏹ Stop Rec';
+                btnRec.className   = 'vc-btn vc-btn-danger recording';
+            } else {
+                btnRec.textContent = '⏺ Record';
+                btnRec.className   = 'vc-btn vc-btn-danger';
+            }
+        }
+
+        // Arrancar cuando el DOM esté listo
+        document.addEventListener('DOMContentLoaded', initVideo);
+    </script>
+</body>
+</html>

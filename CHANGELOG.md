@@ -1,3 +1,46 @@
+## [2.3.0] — 2026-05-12
+
+### Añadido
+- **video_streamer.py**: Módulo completo de captura y streaming de video FPV
+  - DeviceManager: enumeración automática de capturadoras USB disponibles
+  - VideoCapture: lectura de frames via OpenCV con DirectShow (baja latencia en Windows)
+  - FPVVideoTrack: track de video WebRTC basado en aiortc (sin audio)
+  - WebRTCManager: manejo multi-cliente peer-to-peer con RTCPeerConnection por cliente
+  - VideoRecorder: grabación MP4 sincronizada con el session_id de telemetría
+  - Modo standalone: `python video_streamer.py --device 0` para probar la capturadora
+- **VideoPlayer.js** (`js/modules/VideoPlayer.js`): cliente WebRTC completo en el browser
+  - Señalización SDP automática via POST /offer
+  - Reconexión automática con backoff exponencial
+  - Control de dispositivo y resolución
+  - Inicio/detención de grabación sincronizada
+- **Endpoints API de video** en elrs_backend.py:
+  - `GET /api/video/devices` — lista capturadoras disponibles
+  - `GET /api/video/status`  — estado del stream y grabación
+  - `POST /api/video/start`  — iniciar captura (device_id, width, height, fps)
+  - `POST /api/video/stop`   — detener captura
+  - `POST /api/video/recording/start` — grabar sincronizado con sesión
+  - `POST /api/video/recording/stop`  — detener grabación
+  - `POST /offer`            — señalización WebRTC SDP offer/answer
+- **index.html**: Reemplazo del placeholder por player WebRTC real
+  - Elemento `<video>` nativo con autoplay/mute
+  - Barra de controles: selector de dispositivo, resolución, start/stop stream, record
+  - Indicador de estado: IDLE / CONNECTING / CONNECTED / ERROR
+  - Timer de grabación en tiempo real
+  - Reconexión automática al perder el stream
+- **PLAN_VIDEO_WEBRTC.md**: Documento de arquitectura de la iteración de video
+
+### Cambiado
+- elrs_backend.py v3.0: carga opcional del módulo de video (falla gracefully si faltan deps)
+- index.html: panel central ahora es el player WebRTC con controles completos
+
+### Dependencias nuevas
+```bash
+pip install aiortc opencv-python
+```
+
+---
+
+
 # Changelog — ELRS Telemetry System
 
 Todos los cambios notables de este proyecto están documentados en este archivo.

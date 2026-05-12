@@ -50,7 +50,7 @@ logs/
 ### Requisitos
 
 - Python 3.8 o superior
-- RadioMaster TX12 con EdgeTX
+- RadioMaster con EdgeTX
 - Mobula8 con ELRS receptor
 - Cable USB (datos, no solo carga)
 - Navegador moderno (Chrome 90+, Firefox 88+)
