@@ -21,16 +21,94 @@ import fractions
 
 import cv2
 import numpy as np
-
-from aiortc import RTCPeerConnection, RTCSessionDescription, MediaStreamTrack
-from aiortc.contrib.media import MediaBlackhole
-from av import VideoFrame
+import json
+import logging
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Optional, Dict
+import fractions
 
 log = logging.getLogger("video_streamer")
 
-LOGS_DIR  = Path(__file__).parent / "logs"
-VIDEO_DIR = LOGS_DIR / "video"
+LOGS_DIR    = Path(__file__).parent / "logs"
+VIDEO_DIR   = LOGS_DIR / "video"
+CONFIG_FILE = Path(__file__).parent / "video_config.json"
 VIDEO_DIR.mkdir(parents=True, exist_ok=True)
+
+
+# ──────────────────────────────────────────────
+# 0. Config Loader
+# ──────────────────────────────────────────────
+
+def load_video_config() -> dict:
+    """Carga video_config.json generado por video_calibrate.py"""
+    defaults = {
+        "brightness":  0,
+        "contrast":    32,
+        "saturation":  60,
+        "gamma":       1.0,
+        "hist_eq":     False,
+        "ntsc":        True,
+        # White Balance por canal (nuevo)
+        "wb_r":        1.0,
+        "wb_g":        1.0,
+        "wb_b":        1.0,
+    }
+    if CONFIG_FILE.exists():
+        try:
+            with open(CONFIG_FILE) as f:
+                cfg = {**defaults, **json.load(f)}
+            log.info(f"[Video] Config cargada: {cfg}")
+            return cfg
+        except Exception as e:
+            log.warning(f"[Video] Error leyendo config, usando defaults: {e}")
+    return defaults
+
+def apply_white_balance(frame: np.ndarray, wb_r: float, wb_g: float, wb_b: float) -> np.ndarray:
+    """Corrección de White Balance multiplicando cada canal RGB."""
+    if wb_r == 1.0 and wb_g == 1.0 and wb_b == 1.0:
+        return frame
+    result = frame.astype(np.float32)
+    result[:, :, 0] = np.clip(result[:, :, 0] * wb_b, 0, 255)  # B
+    result[:, :, 1] = np.clip(result[:, :, 1] * wb_g, 0, 255)  # G
+    result[:, :, 2] = np.clip(result[:, :, 2] * wb_r, 0, 255)  # R
+    return result.astype(np.uint8)
+
+
+def apply_gamma(frame: np.ndarray, gamma: float) -> np.ndarray:
+    """Corrección de gamma via LUT."""
+    if gamma == 1.0:
+        return frame
+    inv_gamma = 1.0 / gamma
+    table = np.array([((i / 255.0) ** inv_gamma) * 255
+                      for i in range(256)], dtype="uint8")
+    return cv2.LUT(frame, table)
+
+
+def apply_hist_eq(frame: np.ndarray) -> np.ndarray:
+    """Ecualización de histograma en canal Y (luminancia)."""
+    yuv = cv2.cvtColor(frame, cv2.COLOR_BGR2YUV)
+    yuv[:, :, 0] = cv2.equalizeHist(yuv[:, :, 0])
+    return cv2.cvtColor(yuv, cv2.COLOR_YUV2BGR)
+
+
+def apply_software_correction(frame: np.ndarray, cfg: dict) -> np.ndarray:
+    """Aplica todas las correcciones de software al frame."""
+    result = frame
+    # 1. White Balance (primero, antes del gamma)
+    wb_r = cfg.get("wb_r", 1.0)
+    wb_g = cfg.get("wb_g", 1.0)
+    wb_b = cfg.get("wb_b", 1.0)
+    if wb_r != 1.0 or wb_g != 1.0 or wb_b != 1.0:
+        result = apply_white_balance(result, wb_r, wb_g, wb_b)
+    # 2. Gamma
+    if cfg.get("gamma", 1.0) != 1.0:
+        result = apply_gamma(result, cfg["gamma"])
+    # 3. Ecualización de histograma
+    if cfg.get("hist_eq", False):
+        result = apply_hist_eq(result)
+    return result
+
 
 # ──────────────────────────────────────────────
 # 1. Device Manager
@@ -97,6 +175,7 @@ class VideoCapture:
         self._frame:    Optional[np.ndarray]       = None
         self._lock      = asyncio.Lock()
         self._task:     Optional[asyncio.Task]     = None
+        self._cfg:      dict                       = load_video_config()
 
         self.is_running = False
         self.device_id  = 0
@@ -117,6 +196,9 @@ class VideoCapture:
         self.height    = height
         self.fps       = float(fps)
 
+        # Cargar configuración de calibración
+        self._cfg = load_video_config()
+
         # Intentar con DirectShow primero (Windows, menor latencia)
         cap = cv2.VideoCapture(device_id, cv2.CAP_DSHOW)
         if not cap.isOpened():
@@ -127,11 +209,16 @@ class VideoCapture:
             return False
 
         # Configurar resolución y FPS
+        fps_target = 29.97 if self._cfg.get("ntsc", True) else 25.0
         cap.set(cv2.CAP_PROP_FRAME_WIDTH,  width)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
-        cap.set(cv2.CAP_PROP_FPS,          fps)
-        # Reducir buffer interno para menor latencia
+        cap.set(cv2.CAP_PROP_FPS,          fps_target)
         cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+
+        # Aplicar propiedades de calibración al driver
+        cap.set(cv2.CAP_PROP_BRIGHTNESS,  self._cfg.get("brightness", 0))
+        cap.set(cv2.CAP_PROP_CONTRAST,    self._cfg.get("contrast", 32))
+        cap.set(cv2.CAP_PROP_SATURATION,  self._cfg.get("saturation", 60))
 
         # Verificar frame
         ret, frame = cap.read()
@@ -142,7 +229,8 @@ class VideoCapture:
 
         actual_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         actual_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        log.info(f"Capturadora abierta: device={device_id} {actual_w}x{actual_h} @ {fps}fps")
+        actual_fps = cap.get(cv2.CAP_PROP_FPS)
+        log.info(f"Capturadora: device={device_id} {actual_w}x{actual_h} @ {actual_fps:.1f}fps | cfg={self._cfg}")
 
         self._cap        = cap
         self._frame      = frame
@@ -178,8 +266,10 @@ class VideoCapture:
                     None, self._cap.read
                 )
                 if ret and frame is not None:
+                    # Aplicar correcciones de software (gamma, hist eq)
+                    corrected = apply_software_correction(frame, self._cfg)
                     async with self._lock:
-                        self._frame = frame
+                        self._frame = corrected
                         self.frame_count += 1
                 else:
                     await asyncio.sleep(0.01)
