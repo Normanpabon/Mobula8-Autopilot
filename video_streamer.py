@@ -12,6 +12,7 @@ Uso independiente (test):
 """
 
 import asyncio
+import concurrent.futures
 import time
 import logging
 from datetime import datetime, timezone
@@ -22,11 +23,10 @@ import fractions
 import cv2
 import numpy as np
 import json
-import logging
-from datetime import datetime, timezone
-from pathlib import Path
-from typing import Optional, Dict
-import fractions
+
+from aiortc import MediaStreamTrack, RTCPeerConnection, RTCSessionDescription
+from aiortc.contrib.media import MediaPlayer
+from av import VideoFrame
 
 log = logging.getLogger("video_streamer")
 
@@ -118,32 +118,51 @@ class DeviceManager:
     """Enumera los dispositivos de captura de video disponibles."""
 
     @staticmethod
+    def _test_device(idx: int) -> Optional[dict]:
+        """Prueba un índice de dispositivo y retorna su info o None."""
+        try:
+            cap = cv2.VideoCapture(idx, cv2.CAP_DSHOW)
+            if not cap.isOpened():
+                cap = cv2.VideoCapture(idx)
+            if not cap.isOpened():
+                return None
+            ret, frame = cap.read()
+            if not ret or frame is None:
+                cap.release()
+                return None
+            result = {
+                "id":        idx,
+                "name":      DeviceManager.get_device_name(idx),
+                "width":     int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
+                "height":    int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)),
+                "fps":       cap.get(cv2.CAP_PROP_FPS) or 30,
+                "available": True,
+            }
+            cap.release()
+            return result
+        except Exception:
+            return None
+
+    @staticmethod
     def enumerate() -> list[dict]:
         """
-        Prueba índices 0-9 y retorna los que respondan.
-        En Windows usa DirectShow backend para mejor compatibilidad.
+        Prueba índices 0-4 en paralelo (máx 5 workers) con timeout de 12s total.
+        Usa DirectShow en Windows para menor latencia.
         """
         devices = []
-        for idx in range(10):
-            cap = cv2.VideoCapture(idx, cv2.CAP_DSHOW)  # DirectShow en Windows
-            if not cap.isOpened():
-                cap = cv2.VideoCapture(idx)              # Fallback
-            if cap.isOpened():
-                ret, frame = cap.read()
-                if ret and frame is not None:
-                    w   = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-                    h   = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-                    fps = cap.get(cv2.CAP_PROP_FPS) or 30
-                    devices.append({
-                        "id":         idx,
-                        "name":       f"Capture Device {idx}",
-                        "width":      w,
-                        "height":     h,
-                        "fps":        fps,
-                        "available":  True,
-                    })
-                cap.release()
-        return devices
+        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+            futs = [executor.submit(DeviceManager._test_device, idx) for idx in range(5)]
+            try:
+                for fut in concurrent.futures.as_completed(futs, timeout=12):
+                    try:
+                        result = fut.result()
+                        if result:
+                            devices.append(result)
+                    except Exception:
+                        pass
+            except concurrent.futures.TimeoutError:
+                pass
+        return sorted(devices, key=lambda d: d["id"])
 
     @staticmethod
     def get_device_name(device_id: int) -> str:
@@ -282,6 +301,14 @@ class VideoCapture:
         async with self._lock:
             return self._frame.copy() if self._frame is not None else None
 
+    def update_config(self, cfg: dict) -> None:
+        """Aplica nueva configuración al stream en curso sin reiniciarlo."""
+        self._cfg = {**self._cfg, **cfg}
+        if self._cap:
+            self._cap.set(cv2.CAP_PROP_BRIGHTNESS,  self._cfg.get("brightness", 0))
+            self._cap.set(cv2.CAP_PROP_CONTRAST,    self._cfg.get("contrast", 32))
+            self._cap.set(cv2.CAP_PROP_SATURATION,  self._cfg.get("saturation", 60))
+
     @property
     def status(self) -> dict:
         return {
@@ -300,44 +327,33 @@ class VideoCapture:
 
 class FPVVideoTrack(MediaStreamTrack):
     """
-    Track de video WebRTC que alimenta frames desde la capturadora.
-    Sin audio.
+    Track de video WebRTC alimentado por un frame_getter async.
+    Desacoplado de VideoCapture para permitir insertar YOLO en el pipeline.
     """
     kind = "video"
 
-    def __init__(self, capture: VideoCapture):
+    def __init__(self, frame_getter, width: int = 1280, height: int = 720, fps: float = 30):
         super().__init__()
-        self._capture = capture
-        self._pts     = 0
-        self._time_base = fractions.Fraction(1, 90000)  # 90kHz clock (WebRTC estándar)
+        self._get_frame = frame_getter   # async callable → Optional[np.ndarray] BGR
+        self._width     = width
+        self._height    = height
+        self._fps       = float(fps) or 30
+        self._pts       = 0
+        self._time_base = fractions.Fraction(1, 90000)
 
     async def recv(self) -> VideoFrame:
-        """Llamado por aiortc para obtener el siguiente frame."""
-        # Obtener frame de la capturadora
-        frame_bgr = await self._capture.get_frame()
-
+        frame_bgr = await self._get_frame()
         if frame_bgr is None:
-            # Frame negro si no hay video
-            frame_bgr = np.zeros(
-                (self._capture.height, self._capture.width, 3), dtype=np.uint8
-            )
+            frame_bgr = np.zeros((self._height, self._width, 3), dtype=np.uint8)
 
-        # BGR → RGB (WebRTC espera RGB)
-        frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-
-        # Crear VideoFrame de aiortc
+        frame_rgb   = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
         video_frame = VideoFrame.from_ndarray(frame_rgb, format="rgb24")
 
-        # Timestamps WebRTC
-        fps    = self._capture.fps or 30
-        pts_inc = int(90000 / fps)  # incremento en 90kHz
-        video_frame.pts      = self._pts
+        video_frame.pts       = self._pts
         video_frame.time_base = self._time_base
-        self._pts += pts_inc
+        self._pts += int(90000 / self._fps)
 
-        # Pequeño sleep para mantener el FPS correcto
-        await asyncio.sleep(1.0 / fps)
-
+        await asyncio.sleep(1.0 / self._fps)
         return video_frame
 
 
@@ -445,26 +461,27 @@ class VideoRecorder:
 class WebRTCManager:
     """
     Gestiona las conexiones WebRTC peer-to-peer.
-    Cada cliente (browser) obtiene su propia RTCPeerConnection.
+    Recibe un frame_getter para desacoplarse de VideoCapture
+    y permitir inyectar pasos intermedios (YOLO, overlay, etc.).
     """
 
-    def __init__(self, capture: VideoCapture):
-        self._capture: VideoCapture          = capture
-        self._peers:   Dict[str, RTCPeerConnection] = {}
+    def __init__(self, frame_getter, width: int = 1280, height: int = 720, fps: float = 30):
+        self._frame_getter = frame_getter
+        self._width        = width
+        self._height       = height
+        self._fps          = float(fps) or 30
+        self._peers:       Dict[str, RTCPeerConnection] = {}
 
     async def handle_offer(self, sdp: str, sdp_type: str, peer_id: str) -> dict:
         """
         Procesa un SDP offer del browser y retorna el SDP answer.
-        Esta es la señalización WebRTC.
         """
         offer = RTCSessionDescription(sdp=sdp, type=sdp_type)
         pc    = RTCPeerConnection()
 
-        # Registrar peer
         self._peers[peer_id] = pc
 
-        # Añadir track de video (sin audio)
-        track = FPVVideoTrack(self._capture)
+        track = FPVVideoTrack(self._frame_getter, self._width, self._height, self._fps)
         pc.addTrack(track)
 
         # Evento de cierre
@@ -516,14 +533,30 @@ class WebRTCManager:
 
 class VideoStreamer:
     """
-    Fachada que agrupa captura, WebRTC y grabación.
-    Es la única clase que el backend necesita importar.
+    Fachada que agrupa captura, YOLO, WebRTC y grabación.
+    Pipeline de frames: captura → correcciones → [YOLO] → WebRTC / grabación
     """
 
     def __init__(self):
-        self.capture   = VideoCapture()
-        self.recorder  = VideoRecorder()
-        self.webrtc:   Optional[WebRTCManager] = None
+        self.capture  = VideoCapture()
+        self.recorder = VideoRecorder()
+        self.webrtc:  Optional[WebRTCManager] = None
+
+        # YOLO (opcional — no falla si ultralytics no está instalado)
+        try:
+            from yolo_processor import YOLOProcessor
+            self.yolo: Optional[YOLOProcessor] = YOLOProcessor()
+            log.info("[VideoStreamer] YOLOProcessor disponible")
+        except ImportError:
+            self.yolo = None
+            log.info("[VideoStreamer] yolo_processor no disponible (ultralytics no instalado)")
+
+    async def _get_display_frame(self):
+        """Frame getter para WebRTC: captura → [YOLO] → frame BGR."""
+        frame = await self.capture.get_frame()
+        if frame is not None and self.yolo and self.yolo.enabled:
+            frame = await self.yolo.process_async(frame)
+        return frame
 
     async def start_capture(self, device_id: int = 0,
                             width: int = 1280, height: int = 720,
@@ -531,7 +564,12 @@ class VideoStreamer:
         """Inicia la captura y habilita WebRTC."""
         ok = await self.capture.start(device_id, width, height, fps)
         if ok:
-            self.webrtc = WebRTCManager(self.capture)
+            self.webrtc = WebRTCManager(
+                self._get_display_frame,
+                self.capture.width,
+                self.capture.height,
+                self.capture.fps,
+            )
             log.info("VideoStreamer listo")
         return ok
 
@@ -579,9 +617,10 @@ class VideoStreamer:
     @property
     def status(self) -> dict:
         return {
-            "capture":   self.capture.status,
-            "recorder":  self.recorder.status,
-            "webrtc":    self.webrtc.status if self.webrtc else {"active_peers": 0},
+            "capture":  self.capture.status,
+            "recorder": self.recorder.status,
+            "webrtc":   self.webrtc.status if self.webrtc else {"active_peers": 0},
+            "yolo":     self.yolo.status if self.yolo else {"available": False},
         }
 
     @staticmethod

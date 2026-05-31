@@ -1,3 +1,99 @@
+## [Unreleased] — Fases pendientes
+
+### Fase 3 — Inyección de comandos EdgeTX (mediano plazo)
+- `command_injector.py`: escritura de frames CRSF RC Channels (0x16) hacia la TX12 por USB
+- Deadman switch: canales vuelven a posición neutral si se pierde conexión >500ms
+- Endpoints `POST /api/rc/channels` y `WS /ws/rc`
+- Panel de control manual en la UI (sliders throttle/pitch/roll/yaw + Web Gamepad API)
+- **Pendiente de validación de protocolo**: confirmar si la TX12 acepta CRSF de entrada
+  desde la PC en modo serial, o si se requiere el modo Joystick USB HID de EdgeTX
+
+### Fase 4 — Vuelo autónomo (largo plazo)
+- `autopilot.py`: motor de control autónomo con máquina de estados
+  (IDLE → ARM → TAKEOFF → MISSION → LAND → DISARM)
+- Loop visión → decisión → comando usando telemetría + detecciones YOLO
+- Controlador PID sobre pitch/roll para hover estabilizado
+- Modo Follow target: centra el objeto detectado ajustando yaw/pitch
+- Modo Return to safe: aterrizaje automático por batería baja o pérdida de RSSI
+- Safety: límites de canal configurables, watchdog de telemetría, logging de decisiones
+
+---
+
+## [2.4.0] — 2026-05-31
+
+### Añadido — Fase 2: Pipeline YOLO
+
+- **`yolo_processor.py`**: módulo de inferencia de visión en tiempo real
+  - `YOLOProcessor`: carga modelos YOLOv8/v11 (`.pt`) con warm-up automático
+  - Inferencia asíncrona en `ThreadPoolExecutor` de 1 worker (no bloquea el event loop)
+  - `process_async()`: pipeline `frame BGR → inferencia → frame anotado BGR`
+  - Bounding boxes y labels dibujados con `results[0].plot()` (ultralytics nativo)
+  - Busca modelos en carpeta `models/` primero; descarga automática si no existe
+  - Falla silenciosamente si `ultralytics` no está instalado
+  - `list_local_models()`: enumera archivos `.pt` disponibles localmente
+- **`models/`**: carpeta para modelos `.pt` personalizados (creada automáticamente)
+- **Refactor de pipeline de frames en `video_streamer.py`**:
+  - `FPVVideoTrack` ahora recibe un `frame_getter` (callable async) en vez de `VideoCapture`
+    — desacopla el track WebRTC de la fuente de frames para permitir pasos intermedios
+  - `WebRTCManager` recibe `frame_getter + width/height/fps` en lugar de `VideoCapture`
+  - `VideoStreamer._get_display_frame()`: pipeline `captura → [YOLO si enabled] → frame BGR`
+  - `VideoStreamer` importa `YOLOProcessor` opcionalmente al iniciar
+- **Nuevos endpoints API**:
+  - `GET /api/yolo/status` — estado del procesador (FPS de inferencia, detecciones, modelo)
+  - `GET /api/yolo/models` — lista modelos default + archivos `.pt` en `models/`
+  - `POST /api/yolo/config` — activa/desactiva YOLO, cambia modelo, ajusta confidence
+- **Panel AI en `index.html`**:
+  - Botón **AI** en barra de controles de video
+  - Panel colapsable con selector de modelo, slider de confidence (10–95%) y toggle
+  - Badge `● AI` superpuesto en el video mientras YOLO está activo
+  - Polling de stats cada 1.5s: FPS de inferencia y cantidad de objetos detectados
+  - Carga dinámica de modelos disponibles desde `/api/yolo/models`
+- **`requirements-yolo.txt`**: dependencias opcionales para YOLO (ultralytics)
+
+### Dependencias nuevas (opcionales)
+```bash
+pip install -r requirements-yolo.txt
+# Para GPU CUDA 12.1:
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+pip install -r requirements-yolo.txt
+```
+
+---
+
+## [2.3.1] — 2026-05-31
+
+### Corregido — Fase 1: Estabilización de video
+
+- **Bug crítico de routing** en `elrs_backend.py`: las rutas `GET /api/video/devices` y
+  `GET /api/video/status` eran interceptadas por el catch-all `GET /{full_path:path}` del
+  frontend (registrado antes), devolviendo 404 siempre. Todos los endpoints de video API
+  ahora se registran **antes** del bloque de servicio del frontend.
+- **`POST /api/video/start`**: reemplazado `request: dict = None` (no funcionaba con FastAPI)
+  por modelo Pydantic `VideoStartRequest` — body parsing ahora correcto.
+- **`DeviceManager.enumerate()`**: reescrita para escanear índices 0–4 **en paralelo**
+  con `ThreadPoolExecutor(max_workers=5)` y timeout de 12s total. Elimina el bloqueo de
+  varios segundos por dispositivo que causaba que la UI no recibiera la lista de cámaras.
+- **`VideoCapture.update_config()`**: nuevo método para aplicar brillo/contraste/saturación
+  al vuelo sin reiniciar la captura.
+- Imports duplicados eliminados en `video_streamer.py`.
+
+### Añadido
+
+- **Panel de configuración de video** en `index.html`:
+  - Botón **⚙** en la barra de controles de video
+  - Panel colapsable con sliders para Brightness, Contrast, Saturation y Gamma
+  - Botón **↻ Refresh** para recargar la lista de dispositivos
+  - Botón **✓ Apply** que envía `POST /api/video/config`
+  - Al cargar la página sincroniza los sliders con los valores de `video_config.json`
+- **`GET /api/video/config`**: devuelve la configuración actual de video
+- **`POST /api/video/config`**: actualiza `video_config.json` y aplica cambios al stream
+  en curso sin necesidad de reiniciar
+- **`requirements.txt`**: dependencias core del proyecto con versiones mínimas
+- **`SETUP.md`**: guía de instalación con conda (Python 3.11), pasos para CPU y GPU,
+  workaround para `aiortc` en Windows, comandos útiles de conda
+
+---
+
 ## [2.3.0] — 2026-05-12
 
 ### Añadido

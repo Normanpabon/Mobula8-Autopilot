@@ -10,9 +10,10 @@ import struct
 import time
 
 import serial
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request as FRequest
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 import uvicorn
 
 from session_manager import SessionManager
@@ -92,6 +93,53 @@ system_status = {"serial_port": None, "baud_rate": None, "connected": False,
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True,
                    allow_methods=["*"], allow_headers=["*"])
 
+
+# ──────────────────────────────────────────────────────────────
+# VIDEO — Import (antes de las rutas para evitar que el catch-all
+#         de frontend bloquee GET /api/video/*)
+# ──────────────────────────────────────────────────────────────
+try:
+    from video_streamer import VideoStreamer, CONFIG_FILE, load_video_config
+    video = VideoStreamer()
+    VIDEO_AVAILABLE = True
+    print("[VIDEO] Módulo de video cargado correctamente")
+except ImportError as e:
+    VIDEO_AVAILABLE = False
+    video = None
+    CONFIG_FILE = None
+    load_video_config = None
+    print(f"[VIDEO] Módulo no disponible: {e}")
+    print("[VIDEO] Instala dependencias: pip install aiortc opencv-python")
+
+
+# ──────────────────────────────────────────────────────────────
+# Pydantic models
+# ──────────────────────────────────────────────────────────────
+class VideoStartRequest(BaseModel):
+    device_id: int   = 0
+    width:     int   = 1280
+    height:    int   = 720
+    fps:       int   = 30
+
+class VideoConfigRequest(BaseModel):
+    brightness: int   = 0
+    contrast:   int   = 32
+    saturation: int   = 60
+    gamma:      float = 1.0
+    hist_eq:    bool  = False
+    wb_r:       float = 1.0
+    wb_g:       float = 1.0
+    wb_b:       float = 1.0
+
+class YOLOConfigRequest(BaseModel):
+    enabled:    bool  = False
+    model:      str   = "yolov8n.pt"
+    confidence: float = 0.5
+
+
+# ──────────────────────────────────────────────────────────────
+# Serial reader
+# ──────────────────────────────────────────────────────────────
 async def serial_reader_task(port: str, baud: int):
     global session
     try:
@@ -124,6 +172,10 @@ async def serial_reader_task(port: str, baud: int):
         except Exception as e:
             print(f"[SERIAL] Error: {e}"); await asyncio.sleep(0.1)
 
+
+# ──────────────────────────────────────────────────────────────
+# Telemetry routes
+# ──────────────────────────────────────────────────────────────
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket):
     await manager.connect(ws)
@@ -191,6 +243,147 @@ async def save_and_new():
     system_status["current_session_frames"] = 0
     return JSONResponse({"saved": saved_id, "path": path, "new_session": session.session_id})
 
+
+# ──────────────────────────────────────────────────────────────
+# Video routes
+# IMPORTANTE: Deben estar ANTES del catch-all /{full_path:path}
+# ──────────────────────────────────────────────────────────────
+@app.get("/api/video/devices")
+async def list_video_devices():
+    if not VIDEO_AVAILABLE:
+        return JSONResponse({"error": "Módulo de video no disponible", "devices": []})
+    loop = asyncio.get_event_loop()
+    devices = await loop.run_in_executor(None, VideoStreamer.list_devices)
+    return JSONResponse({"devices": devices, "count": len(devices)})
+
+@app.get("/api/video/status")
+async def get_video_status():
+    if not VIDEO_AVAILABLE or not video:
+        return JSONResponse({"available": False})
+    return JSONResponse({"available": True, **video.status})
+
+@app.get("/api/video/config")
+async def get_video_config():
+    if not VIDEO_AVAILABLE or not load_video_config:
+        return JSONResponse({"brightness": 0, "contrast": 32, "saturation": 60,
+                             "gamma": 1.0, "hist_eq": False,
+                             "wb_r": 1.0, "wb_g": 1.0, "wb_b": 1.0})
+    return JSONResponse(load_video_config())
+
+@app.post("/api/video/config")
+async def update_video_config(req: VideoConfigRequest):
+    if not VIDEO_AVAILABLE or not video:
+        return JSONResponse({"error": "Módulo de video no disponible"}, status_code=503)
+    cfg = {
+        "brightness": req.brightness,
+        "contrast":   req.contrast,
+        "saturation": req.saturation,
+        "gamma":      req.gamma,
+        "hist_eq":    req.hist_eq,
+        "wb_r":       req.wb_r,
+        "wb_g":       req.wb_g,
+        "wb_b":       req.wb_b,
+    }
+    if CONFIG_FILE and load_video_config:
+        existing = load_video_config()
+        existing.update(cfg)
+        with open(CONFIG_FILE, "w") as f:
+            json.dump(existing, f, indent=2)
+    if video.capture.is_running:
+        video.capture.update_config(cfg)
+    return JSONResponse({"updated": True, "config": cfg})
+
+@app.post("/api/video/start")
+async def start_video(req: VideoStartRequest):
+    if not VIDEO_AVAILABLE or not video:
+        return JSONResponse({"error": "Módulo de video no disponible"}, status_code=503)
+    ok = await video.start_capture(req.device_id, req.width, req.height, req.fps)
+    if not ok:
+        return JSONResponse({"error": f"No se pudo abrir dispositivo {req.device_id}"}, status_code=500)
+    return JSONResponse({"started": True, "device_id": req.device_id,
+                         "width": req.width, "height": req.height, "fps": req.fps})
+
+@app.post("/api/video/stop")
+async def stop_video():
+    if not VIDEO_AVAILABLE or not video:
+        return JSONResponse({"error": "Módulo de video no disponible"}, status_code=503)
+    await video.stop_capture()
+    return JSONResponse({"stopped": True})
+
+@app.post("/api/video/recording/start")
+async def start_recording():
+    if not VIDEO_AVAILABLE or not video:
+        return JSONResponse({"error": "Módulo de video no disponible"}, status_code=503)
+    if not video.capture.is_running:
+        return JSONResponse({"error": "Captura no iniciada"}, status_code=400)
+    sid = session.session_id if session else datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    path = video.start_recording(sid)
+    return JSONResponse({"recording": True, "session_id": sid, "path": path})
+
+@app.post("/api/video/recording/stop")
+async def stop_recording():
+    if not VIDEO_AVAILABLE or not video:
+        return JSONResponse({"error": "Módulo de video no disponible"}, status_code=503)
+    path = video.stop_recording()
+    return JSONResponse({"recording": False, "saved": path})
+
+# ──────────────────────────────────────────────────────────────
+# YOLO routes
+# ──────────────────────────────────────────────────────────────
+@app.get("/api/yolo/status")
+async def get_yolo_status():
+    if not VIDEO_AVAILABLE or not video or not video.yolo:
+        return JSONResponse({"available": False})
+    return JSONResponse(video.yolo.status)
+
+@app.get("/api/yolo/models")
+async def list_yolo_models():
+    if not VIDEO_AVAILABLE or not video or not video.yolo:
+        return JSONResponse({"custom": [], "defaults": ["yolov8n.pt", "yolov8s.pt", "yolov8m.pt"]})
+    from yolo_processor import YOLOProcessor
+    custom   = YOLOProcessor.list_local_models()
+    defaults = ["yolov8n.pt", "yolov8s.pt", "yolov8m.pt"]
+    return JSONResponse({"custom": custom, "defaults": defaults})
+
+@app.post("/api/yolo/config")
+async def update_yolo_config(req: YOLOConfigRequest):
+    if not VIDEO_AVAILABLE or not video or not video.yolo:
+        return JSONResponse({"error": "YOLO no disponible"}, status_code=503)
+    yolo = video.yolo
+    if not yolo.is_available():
+        return JSONResponse({"error": "ultralytics no instalado — pip install ultralytics"}, status_code=503)
+    # Cargar modelo si cambió o no hay ninguno cargado
+    if req.enabled and (req.model != yolo._model_path or yolo._model is None):
+        loop = asyncio.get_event_loop()
+        ok   = await loop.run_in_executor(None, yolo.load_model, req.model)
+        if not ok:
+            return JSONResponse({"error": f"No se pudo cargar {req.model}"}, status_code=500)
+    yolo.enabled    = req.enabled
+    yolo.confidence = req.confidence
+    return JSONResponse({"updated": True, **yolo.status})
+
+
+@app.post("/offer")
+async def webrtc_offer(request: FRequest):
+    if not VIDEO_AVAILABLE or not video:
+        return JSONResponse({"error": "Video no disponible"}, status_code=503)
+    if not video.capture.is_running:
+        return JSONResponse({"error": "Captura no iniciada. Llama /api/video/start primero"}, status_code=400)
+    body     = await request.json()
+    sdp      = body.get("sdp")
+    sdp_type = body.get("type", "offer")
+    peer_id  = body.get("peer_id", f"peer_{int(time.time()*1000)}")
+    if not sdp:
+        return JSONResponse({"error": "SDP requerido"}, status_code=400)
+    answer = await video.handle_offer(sdp, sdp_type, peer_id)
+    if not answer:
+        return JSONResponse({"error": "No se pudo crear answer"}, status_code=500)
+    return JSONResponse(answer)
+
+
+# ──────────────────────────────────────────────────────────────
+# Frontend serving — el catch-all DEBE ser el último GET registrado
+# ──────────────────────────────────────────────────────────────
 frontend_path = Path(__file__).parent / "frontend-vanilla"
 
 if frontend_path.exists():
@@ -219,6 +412,10 @@ else:
     @app.get("/")
     async def root(): return JSONResponse({"message": "ELRS v2.0", "error": "frontend-vanilla/ not found"})
 
+
+# ──────────────────────────────────────────────────────────────
+# Startup / Shutdown
+# ──────────────────────────────────────────────────────────────
 @app.on_event("startup")
 async def startup_event():
     global session
@@ -246,129 +443,3 @@ if __name__ == "__main__":
     args = parser.parse_args()
     print(f"ELRS Telemetry Server v2.0 | {args.port}@{args.baud} | http://localhost:{args.web_port}")
     uvicorn.run(app, host=args.host, port=args.web_port, log_level="warning")
-
-
-# ──────────────────────────────────────────────────────────────
-# VIDEO — Import y global
-# ──────────────────────────────────────────────────────────────
-try:
-    from video_streamer import VideoStreamer
-    video = VideoStreamer()
-    VIDEO_AVAILABLE = True
-    print("[VIDEO] Módulo de video cargado correctamente")
-except ImportError as e:
-    VIDEO_AVAILABLE = False
-    video = None
-    print(f"[VIDEO] Módulo no disponible: {e}")
-    print("[VIDEO] Instala dependencias: pip install aiortc opencv-python")
-
-
-# ──────────────────────────────────────────────────────────────
-# API — Video Devices
-# ──────────────────────────────────────────────────────────────
-@app.get("/api/video/devices")
-async def list_video_devices():
-    """Lista los dispositivos de captura de video disponibles."""
-    if not VIDEO_AVAILABLE:
-        return JSONResponse({"error": "Módulo de video no disponible", "devices": []})
-    import asyncio
-    loop = asyncio.get_event_loop()
-    devices = await loop.run_in_executor(None, VideoStreamer.list_devices)
-    return JSONResponse({"devices": devices, "count": len(devices)})
-
-
-@app.get("/api/video/status")
-async def get_video_status():
-    """Estado actual del stream y grabación."""
-    if not VIDEO_AVAILABLE or not video:
-        return JSONResponse({"available": False})
-    return JSONResponse({"available": True, **video.status})
-
-
-@app.post("/api/video/start")
-async def start_video(request: dict = None):
-    """Inicia la captura de video."""
-    if not VIDEO_AVAILABLE or not video:
-        return JSONResponse({"error": "Módulo de video no disponible"}, status_code=503)
-
-    from fastapi import Request
-    # Defaults
-    device_id = 0
-    width     = 1280
-    height    = 720
-    fps       = 30
-
-    if request:
-        device_id = request.get("device_id", device_id)
-        width     = request.get("width",     width)
-        height    = request.get("height",    height)
-        fps       = request.get("fps",       fps)
-
-    ok = await video.start_capture(device_id, width, height, fps)
-    if not ok:
-        return JSONResponse({"error": f"No se pudo abrir dispositivo {device_id}"}, status_code=500)
-
-    return JSONResponse({"started": True, "device_id": device_id,
-                         "width": width, "height": height, "fps": fps})
-
-
-@app.post("/api/video/stop")
-async def stop_video():
-    """Detiene la captura y el stream."""
-    if not VIDEO_AVAILABLE or not video:
-        return JSONResponse({"error": "Módulo de video no disponible"}, status_code=503)
-    await video.stop_capture()
-    return JSONResponse({"stopped": True})
-
-
-@app.post("/api/video/recording/start")
-async def start_recording():
-    """Inicia grabación MP4 sincronizada con la sesión de telemetría activa."""
-    if not VIDEO_AVAILABLE or not video:
-        return JSONResponse({"error": "Módulo de video no disponible"}, status_code=503)
-    if not video.capture.is_running:
-        return JSONResponse({"error": "Captura no iniciada"}, status_code=400)
-
-    sid = session.session_id if session else datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    path = video.start_recording(sid)
-    return JSONResponse({"recording": True, "session_id": sid, "path": path})
-
-
-@app.post("/api/video/recording/stop")
-async def stop_recording():
-    """Detiene la grabación."""
-    if not VIDEO_AVAILABLE or not video:
-        return JSONResponse({"error": "Módulo de video no disponible"}, status_code=503)
-    path = video.stop_recording()
-    return JSONResponse({"recording": False, "saved": path})
-
-
-# ──────────────────────────────────────────────────────────────
-# WebRTC — Signaling
-# ──────────────────────────────────────────────────────────────
-from fastapi import Request as FRequest
-
-@app.post("/offer")
-async def webrtc_offer(request: FRequest):
-    """
-    Endpoint de señalización WebRTC.
-    El browser envía un SDP offer y recibe un SDP answer.
-    """
-    if not VIDEO_AVAILABLE or not video:
-        return JSONResponse({"error": "Video no disponible"}, status_code=503)
-    if not video.capture.is_running:
-        return JSONResponse({"error": "Captura no iniciada. Llama /api/video/start primero"}, status_code=400)
-
-    body      = await request.json()
-    sdp       = body.get("sdp")
-    sdp_type  = body.get("type", "offer")
-    peer_id   = body.get("peer_id", f"peer_{int(time.time()*1000)}")
-
-    if not sdp:
-        return JSONResponse({"error": "SDP requerido"}, status_code=400)
-
-    answer = await video.handle_offer(sdp, sdp_type, peer_id)
-    if not answer:
-        return JSONResponse({"error": "No se pudo crear answer"}, status_code=500)
-
-    return JSONResponse(answer)

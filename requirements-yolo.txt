@@ -1,0 +1,12 @@
+# ─────────────────────────────────────────────────────────────
+# Dependencias opcionales para el pipeline YOLO (Fase 2)
+# Instalar con:  pip install -r requirements-yolo.txt
+#
+# Por defecto instala PyTorch CPU.
+# Para GPU con CUDA 12.1, instalar torch manualmente ANTES:
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+# Para GPU con CUDA 11.8:
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
+# ─────────────────────────────────────────────────────────────
+
+ultralytics>=8.2.0
