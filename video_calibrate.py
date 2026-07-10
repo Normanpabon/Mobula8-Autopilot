@@ -295,7 +295,12 @@ def main():
         print(f"⚠  Saturación en {cfg['saturation']} (muy alta). Bajándola a 70 automáticamente.")
         cfg["saturation"] = 70
 
-    cap = cv2.VideoCapture(args.device, cv2.CAP_DSHOW)
+    # MSMF primero (OpenCV 4.8+ en Windows abre por índice con más fiabilidad
+    # y mantiene el mismo mapeo de índices que video_streamer); DSHOW de fallback
+    cap = cv2.VideoCapture(args.device, cv2.CAP_MSMF)
+    if not cap.isOpened():
+        cap.release()
+        cap = cv2.VideoCapture(args.device, cv2.CAP_DSHOW)
     if not cap.isOpened():
         cap = cv2.VideoCapture(args.device)
     if not cap.isOpened():

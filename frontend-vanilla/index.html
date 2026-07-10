@@ -606,6 +606,11 @@
 
         // ── Update UI ───────────────────────────────
         function updateVideoUI({ state, recording }) {
+            // FIX v2.4.1: sincronizar el flag `streaming` con el estado real.
+            // Antes, tras un error, `streaming` quedaba en true y el botón
+            // "Retry" ejecutaba disconnect() en lugar de reconectar.
+            streaming = (state === 'connected' || state === 'connecting');
+
             const badge    = document.getElementById('vcBadge');
             const btnStr   = document.getElementById('btnStream');
             const btnRec   = document.getElementById('btnRecord');

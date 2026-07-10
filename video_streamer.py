@@ -13,6 +13,7 @@ Uso independiente (test):
 
 import asyncio
 import concurrent.futures
+import platform
 import time
 import logging
 from datetime import datetime, timezone
@@ -34,6 +35,23 @@ LOGS_DIR    = Path(__file__).parent / "logs"
 VIDEO_DIR   = LOGS_DIR / "video"
 CONFIG_FILE = Path(__file__).parent / "video_config.json"
 VIDEO_DIR.mkdir(parents=True, exist_ok=True)
+
+IS_WINDOWS = platform.system() == "Windows"
+
+
+def _open_capture(device_id: int) -> cv2.VideoCapture:
+    """
+    Abre la capturadora probando backends en orden de compatibilidad.
+    OpenCV 4.8+ en Windows: MSMF es el backend fiable para apertura
+    por índice; DSHOW queda como fallback.
+    """
+    backends = [cv2.CAP_MSMF, cv2.CAP_DSHOW] if IS_WINDOWS else [cv2.CAP_ANY]
+    for be in backends:
+        cap = cv2.VideoCapture(device_id, be)
+        if cap.isOpened():
+            return cap
+        cap.release()
+    return cv2.VideoCapture(device_id)  # último recurso
 
 
 # ──────────────────────────────────────────────
@@ -121,9 +139,7 @@ class DeviceManager:
     def _test_device(idx: int) -> Optional[dict]:
         """Prueba un índice de dispositivo y retorna su info o None."""
         try:
-            cap = cv2.VideoCapture(idx, cv2.CAP_DSHOW)
-            if not cap.isOpened():
-                cap = cv2.VideoCapture(idx)
+            cap = _open_capture(idx)
             if not cap.isOpened():
                 return None
             ret, frame = cap.read()
@@ -165,20 +181,30 @@ class DeviceManager:
         return sorted(devices, key=lambda d: d["id"])
 
     @staticmethod
-    def get_device_name(device_id: int) -> str:
-        """Intenta obtener el nombre del dispositivo via DirectShow (Windows)."""
+    def _get_pnp_names() -> list[str]:
+        """
+        Nombres de dispositivos via WMI Win32_PnPEntity.
+        Las EasyCap suelen registrarse como clase Media/Image,
+        no Camera, por eso no se usa Get-PnpDevice -Class Camera.
+        """
         try:
             import subprocess
             result = subprocess.run(
-                ["powershell", "-Command",
-                 "Get-PnpDevice -Class Camera | Select-Object -ExpandProperty FriendlyName"],
-                capture_output=True, text=True, timeout=5
+                ["powershell", "-NoProfile", "-Command",
+                 "Get-CimInstance Win32_PnPEntity | "
+                 "Where-Object { $_.PNPClass -in @('Camera','Image','Media') -and $_.Status -eq 'OK' } | "
+                 "Select-Object -ExpandProperty Name"],
+                capture_output=True, text=True, timeout=8
             )
-            names = [l.strip() for l in result.stdout.splitlines() if l.strip()]
-            if device_id < len(names):
-                return names[device_id]
+            return [l.strip() for l in result.stdout.splitlines() if l.strip()]
         except Exception:
-            pass
+            return []
+
+    @staticmethod
+    def get_device_name(device_id: int) -> str:
+        names = DeviceManager._get_pnp_names()
+        if device_id < len(names):
+            return names[device_id]
         return f"Capture Device {device_id}"
 
 
@@ -218,10 +244,9 @@ class VideoCapture:
         # Cargar configuración de calibración
         self._cfg = load_video_config()
 
-        # Intentar con DirectShow primero (Windows, menor latencia)
-        cap = cv2.VideoCapture(device_id, cv2.CAP_DSHOW)
-        if not cap.isOpened():
-            cap = cv2.VideoCapture(device_id)
+        # MSMF primero en Windows (OpenCV 4.8+ abre por índice con más
+        # fiabilidad); DSHOW queda como fallback dentro de _open_capture
+        cap = _open_capture(device_id)
 
         if not cap.isOpened():
             log.error(f"No se pudo abrir dispositivo {device_id}")
@@ -662,7 +687,7 @@ if __name__ == "__main__":
     print("Presiona Q para salir.")
     print()
 
-    cap = cv2.VideoCapture(args.device, cv2.CAP_DSHOW)
+    cap = _open_capture(args.device)
     cap.set(cv2.CAP_PROP_FRAME_WIDTH,  args.width)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, args.height)
     cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)

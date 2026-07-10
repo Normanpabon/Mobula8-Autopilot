@@ -1,21 +1,48 @@
-## [Unreleased] — Fases pendientes
+> Las fases pendientes (Fase 3 — inyección EdgeTX, Fase 4 — vuelo autónomo)
+> y el resto del trabajo futuro viven ahora en `ROADMAP.md`.
 
-### Fase 3 — Inyección de comandos EdgeTX (mediano plazo)
-- `command_injector.py`: escritura de frames CRSF RC Channels (0x16) hacia la TX12 por USB
-- Deadman switch: canales vuelven a posición neutral si se pierde conexión >500ms
-- Endpoints `POST /api/rc/channels` y `WS /ws/rc`
-- Panel de control manual en la UI (sliders throttle/pitch/roll/yaw + Web Gamepad API)
-- **Pendiente de validación de protocolo**: confirmar si la TX12 acepta CRSF de entrada
-  desde la PC en modo serial, o si se requiere el modo Joystick USB HID de EdgeTX
+## [2.4.1] — 2026-07-10
 
-### Fase 4 — Vuelo autónomo (largo plazo)
-- `autopilot.py`: motor de control autónomo con máquina de estados
-  (IDLE → ARM → TAKEOFF → MISSION → LAND → DISARM)
-- Loop visión → decisión → comando usando telemetría + detecciones YOLO
-- Controlador PID sobre pitch/roll para hover estabilizado
-- Modo Follow target: centra el objeto detectado ajustando yaw/pitch
-- Modo Return to safe: aterrizaje automático por batería baja o pérdida de RSSI
-- Safety: límites de canal configurables, watchdog de telemetría, logging de decisiones
+### Corregido
+- **`frontend-vanilla/index.html`**: el flag `streaming` no se sincronizaba con el
+  estado real del `VideoPlayer`. Tras un error de conexión quedaba en `true` y el
+  botón "Retry" ejecutaba `disconnect()` en vez de reconectar. Ahora `streaming`
+  se deriva de `state` dentro de `updateVideoUI()`.
+- **`frontend-vanilla/js/modules/VideoPlayer.js`**: `connect()` no cancelaba un
+  timer de reconexión pendiente. Pulsar "Retry" durante el backoff automático
+  podía abrir dos `RTCPeerConnection` simultáneas. Ahora `connect()` limpia el
+  timer al inicio, y el contador de reintentos se resetea en `disconnect()`.
+
+### Cambiado
+- **`elrs_backend.py`** migrado de `@app.on_event("startup"/"shutdown")`
+  (deprecated en FastAPI) al patrón `lifespan` con `@asynccontextmanager`.
+- **CRC8 DVB-S2**: la tabla se precomputa una sola vez al importar el módulo
+  (antes se reconstruía en cada frame CRSF recibido, cientos de veces/segundo).
+- El bloque de carga del módulo de video captura `Exception` genérico (no solo
+  `ImportError`): un fallo de carga en `video_streamer.py` desactiva el módulo
+  de video en vez de tumbar el servidor completo.
+- **Enumeración/apertura de capturadoras**: se prueba `cv2.CAP_MSMF` antes que
+  `cv2.CAP_DSHOW` en Windows (OpenCV 4.8+ abre por índice con más fiabilidad
+  por MSMF). Aplica a `video_streamer.py` y `video_calibrate.py`, manteniendo
+  el mismo mapeo de índices entre ambos.
+- **Nombres de dispositivo** via `Get-CimInstance Win32_PnPEntity` filtrando
+  `PNPClass -in @('Camera','Image','Media')`, en vez de `Get-PnpDevice -Class Camera`
+  (las EasyCap no siempre se registran bajo la clase Camera).
+- Versión del servidor unificada a **2.4.1** (el constructor de `FastAPI(...)`
+  declaraba `2.0.0` desde hacía varias versiones).
+
+### Notas de reconciliación
+- La sesión del 2026-07-10 trabajó sobre un **snapshot antiguo** del proyecto
+  (~v2.3.0) sin los commits de mayo. Sus "fixes críticos" (imports de aiortc,
+  rutas registradas después de `uvicorn.run()`) correspondían a bugs de ese
+  snapshot que **ya estaban resueltos** en el repo desde v2.3.1/v2.4.0, y sus
+  versiones de los `.py` eliminaban toda la integración YOLO. Se descartaron
+  esos archivos y se portaron a la base v2.4.0 únicamente las mejoras listadas
+  arriba. `VideoPlayer.js` e `index.html` (raíz) fueron absorbidos en
+  `frontend-vanilla/` y eliminados de la raíz.
+- Pendiente: **validación en runtime con hardware real** (TX12 + Mobula8 +
+  EasyCap). Todo lo anterior se verificó por importación del backend
+  (12 rutas de video/YOLO registradas), `py_compile` y `node --check`.
 
 ---
 

@@ -1,8 +1,12 @@
 /**
- * VideoPlayer — Cliente WebRTC para el stream FPV
+ * VideoPlayer — Cliente WebRTC para el stream FPV (v2.3.1)
  *
  * Maneja la señalización WebRTC con el backend (aiortc),
  * la reconexión automática y los controles de grabación.
+ *
+ * Fix v2.3.1: connect() ahora cancela cualquier reconexión pendiente
+ * antes de conectar. Antes, pulsar "Retry" con un timer de backoff
+ * activo producía dos conexiones simultáneas.
  */
 
 export class VideoPlayer {
@@ -71,8 +75,11 @@ export class VideoPlayer {
      * @param {object} captureOptions - { device_id, width, height, fps }
      */
     async connect(captureOptions = {}) {
+        // FIX: cancelar reconexión pendiente antes de conectar
+        // (evita conexiones dobles al pulsar Retry durante el backoff)
+        this._clearReconnect();
+
         this._setState('connecting');
-        this._reconnects = 0;
 
         try {
             // 1. Decirle al backend que abra la capturadora
@@ -106,6 +113,7 @@ export class VideoPlayer {
     /** Desconecta el stream y detiene la captura en el servidor */
     async disconnect() {
         this._clearReconnect();
+        this._reconnects = 0;
         await this._closePeer();
 
         try {

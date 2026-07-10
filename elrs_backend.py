@@ -1,7 +1,8 @@
 """
-ELRS Backend WebSocket Server v2.0
+ELRS Backend WebSocket Server v2.4.1
 """
 import asyncio, json, argparse
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from collections import deque
@@ -20,16 +21,19 @@ from session_manager import SessionManager
 
 CRSF_SYNC = 0xEA
 
+# Tabla CRC8 DVB-S2 precomputada una sola vez al importar el módulo
+# (se consulta por cada frame CRSF recibido, cientos de veces por segundo)
+_CRC_TABLE = []
+for _i in range(256):
+    _c = _i
+    for _ in range(8):
+        _c = ((_c<<1)^0xD5)&0xFF if (_c&0x80) else (_c<<1)&0xFF
+    _CRC_TABLE.append(_c)
+
 def crc8_dvb_s2(data: bytes) -> int:
-    crc_table = [0]*256
-    for i in range(256):
-        c = i
-        for _ in range(8):
-            c = ((c<<1)^0xD5)&0xFF if (c&0x80) else (c<<1)&0xFF
-        crc_table[i] = c
     crc = 0
     for b in data:
-        crc = crc_table[crc ^ b]
+        crc = _CRC_TABLE[crc ^ b]
     return crc
 
 def parse_crsf_frame(raw: bytes) -> Optional[dict]:
@@ -82,7 +86,28 @@ class ConnectionManager:
         except:
             if ws in self.active_connections: self.active_connections.remove(ws)
 
-app = FastAPI(title="ELRS Telemetry Server", version="2.0.0")
+# ──────────────────────────────────────────────────────────────
+# Lifespan (reemplaza @app.on_event, deprecated en FastAPI)
+# ──────────────────────────────────────────────────────────────
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup
+    global session
+    system_status["start_time"] = datetime.now(timezone.utc)
+    session = SessionManager()
+    system_status["current_session_id"] = session.session_id
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--port", default="COM6")
+    parser.add_argument("--baud", type=int, default=115200)
+    args, _ = parser.parse_known_args()
+    asyncio.create_task(serial_reader_task(args.port, args.baud))
+    print("[SERVER] ELRS Telemetry Server v2.4.1 listo")
+    yield
+    # Shutdown
+    if session and session.current_frame_count > 0:
+        print("[SERVER] Guardando sesión..."); session.save()
+
+app = FastAPI(title="ELRS Telemetry Server", version="2.4.1", lifespan=lifespan)
 manager = ConnectionManager()
 session: Optional[SessionManager] = None
 telemetry_history = deque(maxlen=500)
@@ -103,7 +128,9 @@ try:
     video = VideoStreamer()
     VIDEO_AVAILABLE = True
     print("[VIDEO] Módulo de video cargado correctamente")
-except ImportError as e:
+except Exception as e:
+    # Exception genérico (no solo ImportError): un error de carga en
+    # video_streamer.py debe desactivar el módulo de video, no tumbar el server
     VIDEO_AVAILABLE = False
     video = None
     CONFIG_FILE = None
@@ -410,36 +437,15 @@ if frontend_path.exists():
         return FileResponse(index) if index.exists() else JSONResponse({"error": "Not found"}, 404)
 else:
     @app.get("/")
-    async def root(): return JSONResponse({"message": "ELRS v2.0", "error": "frontend-vanilla/ not found"})
+    async def root(): return JSONResponse({"message": "ELRS v2.4.1", "error": "frontend-vanilla/ not found"})
 
-
-# ──────────────────────────────────────────────────────────────
-# Startup / Shutdown
-# ──────────────────────────────────────────────────────────────
-@app.on_event("startup")
-async def startup_event():
-    global session
-    system_status["start_time"] = datetime.now(timezone.utc)
-    session = SessionManager()
-    system_status["current_session_id"] = session.session_id
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--port", default="COM6")
-    parser.add_argument("--baud", type=int, default=115200)
-    args, _ = parser.parse_known_args()
-    asyncio.create_task(serial_reader_task(args.port, args.baud))
-    print("[SERVER] ELRS Telemetry Server v2.0 listo")
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    if session and session.current_frame_count > 0:
-        print("[SERVER] Guardando sesión..."); session.save()
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="ELRS Telemetry Server v2.0")
+    parser = argparse.ArgumentParser(description="ELRS Telemetry Server v2.4.1")
     parser.add_argument("--port", default="COM6")
     parser.add_argument("--baud", type=int, default=115200)
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--web-port", type=int, default=8080)
     args = parser.parse_args()
-    print(f"ELRS Telemetry Server v2.0 | {args.port}@{args.baud} | http://localhost:{args.web_port}")
+    print(f"ELRS Telemetry Server v2.4.1 | {args.port}@{args.baud} | http://localhost:{args.web_port}")
     uvicorn.run(app, host=args.host, port=args.web_port, log_level="warning")
