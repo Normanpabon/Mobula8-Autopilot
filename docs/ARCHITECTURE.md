@@ -2,7 +2,7 @@
 
 Resumen arquitectónico del sistema para que un desarrollador nuevo pueda
 incorporarse al proyecto sin más contexto que este documento, `SETUP.md`
-(instalación) y el `README.md` (uso). Última actualización: v2.6.0.
+(instalación) y el `README.md` (uso). Última actualización: v2.7.0.
 
 ---
 
@@ -10,7 +10,7 @@ incorporarse al proyecto sin más contexto que este documento, `SETUP.md`
 
 Una estación de tierra para el drone **Mobula8** (whoop de 65 mm con
 receptor ELRS) controlado por un **RadioMaster TX12** (EdgeTX). Corre en un
-laptop Windows y hace tres cosas:
+laptop Windows y hace cuatro cosas:
 
 1. **Telemetría**: lee los frames CRSF que la TX12 refleja por USB serial
    (modo Telem Mirror), los parsea y los transmite en vivo al navegador.
@@ -23,10 +23,15 @@ laptop Windows y hace tres cosas:
    sobre el video. Un `LatencyGovernor` traduce esa latencia en una
    velocidad máxima recomendada para el futuro autopilot
    (ver `docs/VISION_PIPELINE.md`).
+4. **Inyección RC (Fase 3)**: envía frames CRSF RC Channels (0x16) de
+   vuelta a la TX12 por el mismo USB serial, con deadman switch y panel de
+   control manual (sliders/gamepad). ⚠ Pendiente de validar que EdgeTX
+   acepte CRSF entrante en modo Telem Mirror (ver `docs/RC_INJECTION.md`).
 
 El objetivo de largo plazo (ver `ROADMAP.md`) es cerrar el lazo:
 telemetría + visión → decisión → inyección de comandos RC de vuelta a la
-TX12 (vuelo asistido/autónomo).
+TX12 (vuelo asistido/autónomo). Con v2.7.0 las piezas 1–4 existen; falta el
+motor de decisión (`autopilot.py`, Fase 4) y la validación con hardware.
 
 ## 2. Diagrama de flujo de datos
 
@@ -38,7 +43,9 @@ TX12 (vuelo asistido/autónomo).
                                    │  backend/ (Python)  │
                                    │                     │
    serial_reader_task ──► parse_crsf_frame ──► broadcast │
-        │                                        │ WS    │
+        │        ▲                               │ WS    │
+        │   CommandInjector ◄── /api/rc, /ws/rc  │       │
+        │   (frames RC 0x16 + deadman)           │       │
         └──► SessionManager ──► logs/*.json      │       │
                                                  │       │
    VideoCapture ─► correcciones ─► overlay ─► FPVVideoTrack ─► WebRTC (aiortc)
@@ -73,6 +80,7 @@ el stream**: el track WebRTC solo dibuja el último resultado publicado.
 | `vision_pipeline.py` | Orquestador de la cascada de visión: loop de inferencia desacoplado del stream (ThreadPoolExecutor de 1 worker), overlay barato (`annotate()`, solo cv2), y política de latencia para el futuro autopilot. Ver `docs/VISION_PIPELINE.md`. | `VisionPipeline`, `VisionResult`, `LatencyGovernor` (v_max = distancia de seguridad / latencia total; modos off/warming_up/active/stale) |
 | `yolo_processor.py` | Etapa de detección: wrapper síncrono del modelo YOLO (`.pt`/`.onnx`/`.engine`), `imgsz` configurable. Falla silenciosamente si `ultralytics` no está instalado. | `YOLOProcessor`, `infer()` (devuelve detecciones con bbox en píxeles), `list_local_models()` (excluye `-seg`) |
 | `segmentation_processor.py` | Etapa opcional de segmentación previa a la detección: máscara binaria de regiones con objetos, dilatada con margen. `focus_mode="mask"` suprime el fondo antes del detector; `"overlay"` solo dibuja. | `SegmentationProcessor`, `segment()`, `apply_focus()`, `list_local_models()` (solo `-seg`) |
+| `command_injector.py` | Inyección RC (Fase 3): frames CRSF RC Channels Packed (0x16, 16×11 bits) hacia la TX12 por el serial compartido, loop de envío a 50 Hz y deadman switch (>500 ms sin comandos → throttle mínimo, ejes centrados). Pendiente validación de protocolo con hardware. Ver `docs/RC_INJECTION.md`. | `CommandInjector`, `build_rc_frame()`, `set_channels()` (alias AETR o índice 1–16, µs), propiedad `failsafe_active` |
 | `video_calibrate.py` | Herramienta standalone (ventana OpenCV) para calibrar brillo/contraste/gamma/balance de blancos. Guarda en `video_config.json`, que el streamer lee. | Presets WB (`anti_magenta` para el tinte de la EasyCap), ajuste por canal con teclas |
 
 Convención de rutas: los módulos usan `Path(__file__).resolve().parent.parent`
@@ -134,8 +142,14 @@ gráficas), **ES modules** (organización del código).
 - **CRSF sobre USB serial** — sync byte `0xEA` (modo Telem Mirror de
   EdgeTX, no el `0xC8` estándar), CRC8 DVB-S2. Frames parseados: Link
   Stats (`0x14`), Battery (`0x08`), Attitude (`0x1E`), Flight Mode (`0x21`).
+  En sentido contrario (v2.7.0), frames RC Channels Packed (`0x16`)
+  inyectados por el mismo puerto — dirección configurable (`0xEE`/`0xEA`/
+  `0xC8`) porque la aceptación por EdgeTX está pendiente de validación.
 - **WebSocket `/ws`** — JSON por frame de telemetría hacia todos los
   clientes conectados (broadcast con `asyncio.gather`).
+- **WebSocket `/ws/rc`** — canal de baja latencia del panel de control
+  manual/gamepad hacia el `CommandInjector` (10 Hz desde la UI; el deadman
+  cubre la desconexión).
 - **WebRTC** — señalización HTTP simple: el browser hace `POST /offer` con
   su SDP, el backend responde con el answer. Sin STUN/TURN: uso LAN local
   (decisión registrada en `ROADMAP.md`).

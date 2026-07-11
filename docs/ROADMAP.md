@@ -5,9 +5,9 @@ de `README.md`. El README describe el sistema **tal como funciona hoy**; este
 archivo describe **hacia dónde va**. Ver `AGENT_HANDOFF.md` para las reglas
 de cómo mantener ambos documentos.
 
-Última actualización: 2026-07-11 (tras v2.6.0 — pipeline de visión en
-cascada segmentación + YOLO desacoplado del stream, LatencyGovernor y guía
-de fine-tuning; ver `VISION_PIPELINE.md` y `YOLO_FINETUNING.md`).
+Última actualización: 2026-07-11 (tras v2.7.0 — Fase 3: inyección de
+comandos RC con deadman switch, endpoints `/api/rc/*` + `WS /ws/rc` y panel
+de control manual con gamepad; ver `RC_INJECTION.md`).
 
 ---
 
@@ -51,16 +51,24 @@ de fine-tuning; ver `VISION_PIPELINE.md` y `YOLO_FINETUNING.md`).
 
 ## 🟢 Medio plazo — Fase 3: Inyección de comandos EdgeTX
 
-- [ ] `command_injector.py`: escritura de frames CRSF RC Channels (0x16)
-      hacia la TX12 por USB
-- [ ] Deadman switch: canales vuelven a posición neutral si se pierde
-      conexión >500 ms
-- [ ] Endpoints `POST /api/rc/channels` y `WS /ws/rc`
-- [ ] Panel de control manual en la UI (sliders throttle/pitch/roll/yaw +
-      Web Gamepad API)
-- [ ] **Pendiente de validación de protocolo**: confirmar si la TX12 acepta
-      CRSF de entrada desde la PC en modo serial, o si se requiere el modo
-      Joystick USB HID de EdgeTX
+- [x] ~~`command_injector.py`: escritura de frames CRSF RC Channels (0x16)
+      hacia la TX12 por USB~~ — implementado en v2.7.0 (2026-07-11), lado
+      PC completo probado con serial loopback (`RC_INJECTION.md`).
+- [x] ~~Deadman switch: canales vuelven a posición neutral si se pierde
+      conexión >500 ms~~ — v2.7.0: throttle al mínimo (no neutral — al
+      centro subiría), ejes centrados, aux abajo; aplica también antes del
+      primer comando.
+- [x] ~~Endpoints `POST /api/rc/channels` y `WS /ws/rc`~~ — v2.7.0, más
+      `/api/rc/status`, `/api/rc/config` y `/api/rc/center`.
+- [x] ~~Panel de control manual en la UI (sliders throttle/pitch/roll/yaw +
+      Web Gamepad API)~~ — v2.7.0: panel RC con envío continuo a 10 Hz por
+      WS y gamepad Mode 2.
+- [ ] **Pendiente de validación de protocolo** (el único ítem que exige
+      hardware): confirmar si la TX12 acepta CRSF de entrada desde la PC en
+      modo serial — plan de pruebas en `HARDWARE_VALIDATION.md` §7, con las
+      tres direcciones (`0xEE`/`0xEA`/`0xC8`) configurables por API. Plan B
+      si no acepta: modo Joystick USB HID de EdgeTX o módulo ELRS externo
+      en la bahía JR (`RC_INJECTION.md` §3).
 - [ ] GPS y visualización de trayectoria en mapa (requiere módulo GPS,
       el Mobula8 no trae uno de fábrica)
 - [ ] Compresión de logs JSON (gzip) — los archivos de sesión crecen sin

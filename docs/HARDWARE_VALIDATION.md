@@ -113,6 +113,32 @@ son prerequisito unos de otros en el orden dado.
       completa, detección sola, o post-proceso sobre el MP4 grabado?
       (decisión pendiente en el roadmap, esta prueba la informa).
 
+## 4b. Inyección RC (Fase 3 — v2.7.0) ⚠ VALIDACIÓN DE PROTOCOLO
+
+**Orden de seguridad obligatorio: primero solo la TX12 (sin drone), luego
+drone SIN hélices. Nunca con hélices hasta validar el deadman en runtime.**
+
+- [ ] Solo TX12 por USB (drone apagado): habilitar inyección
+      (`POST /api/rc/config {"enabled": true}` o panel RC de la UI) y mover
+      sliders. Observar en la TX12 (pantalla de canales/mixer) si los
+      valores inyectados aparecen. Probar las tres direcciones con
+      `sync_byte`: `0xEE` (default), `0xEA`, `0xC8`.
+- [ ] **Registrar el resultado en `RC_INJECTION.md` §3**: qué dirección
+      acepta EdgeTX en modo Telem Mirror, o que ninguna funciona (→ activar
+      plan B: Joystick USB HID / módulo ELRS externo).
+- [ ] Si acepta: verificar el deadman en runtime — mover un slider, cerrar
+      la pestaña del navegador, confirmar en la TX12 que en ≤500 ms los
+      canales caen a failsafe (throttle mínimo).
+- [ ] Verificar que la telemetría sigue fluyendo con la inyección activa
+      (lectura y escritura comparten el puerto serial — mirar
+      `frames_received` en `/api/status` mientras se inyecta).
+- [ ] Drone encendido SIN hélices: confirmar en Betaflight (pestaña
+      Receiver) que los canales inyectados llegan al FC via ELRS, que el
+      mapeo AETR coincide, y que ARM por aux responde. Repetir la prueba
+      de deadman mirando el receiver tab.
+- [ ] Medir la latencia comando→respuesta del FC (para calibrar el
+      `reaction_time_ms` del LatencyGovernor, hoy 250 ms estimados).
+
 ## 5. Señal RF / rango (si hay oportunidad de vuelo real)
 
 - [ ] Confirmar visualmente que RSSI/LQ decae de forma esperable con la

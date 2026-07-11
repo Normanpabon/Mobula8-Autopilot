@@ -102,6 +102,20 @@
         }
         .yolo-stats span { color: var(--text-accent); }
 
+        /* indicadores del panel RC */
+        .rc-fs-badge {
+            font-family: var(--font-mono); font-size: 10px; letter-spacing: 1px;
+            padding: 2px 8px; border-radius: 3px;
+            background: rgba(255,255,255,.05); color: #4a5568;
+        }
+        .rc-fs-badge.failsafe { background: rgba(255,204,0,.15); color: var(--status-warning); }
+        .rc-fs-badge.live     { background: rgba(0,255,136,.12); color: var(--status-success); }
+        .rc-warn {
+            font-family: var(--font-mono); font-size: 9px;
+            color: var(--status-warning); letter-spacing: .5px;
+            margin-right: auto; align-self: center;
+        }
+
         /* badge sobre el video cuando YOLO está activo */
         .yolo-live-badge {
             position: absolute; top: 10px; right: 10px;
@@ -312,6 +326,53 @@
                 </div>
             </div>
 
+            <!-- RC Inject Panel (collapsible) — Fase 3, pendiente validación de protocolo -->
+            <div class="yolo-panel" id="rcPanel">
+                <div class="yolo-header">
+                    <span class="yolo-title">RC INJECT — FASE 3</span>
+                    <span class="yolo-stats">
+                        <span id="rcFrames">0</span> frames &nbsp;
+                        <span class="rc-fs-badge" id="rcFsBadge">OFF</span>
+                    </span>
+                </div>
+                <div class="vs-row">
+                    <span class="vs-label">THROTTLE</span>
+                    <input type="range" class="vs-slider" id="rcThr" min="988" max="2012" value="988"
+                           oninput="rcSliderInput(this,'rcThrVal')">
+                    <span class="vs-value" id="rcThrVal">988</span>
+                </div>
+                <div class="vs-row">
+                    <span class="vs-label">ROLL</span>
+                    <input type="range" class="vs-slider" id="rcRoll" min="988" max="2012" value="1500"
+                           oninput="rcSliderInput(this,'rcRollVal')">
+                    <span class="vs-value" id="rcRollVal">1500</span>
+                </div>
+                <div class="vs-row">
+                    <span class="vs-label">PITCH</span>
+                    <input type="range" class="vs-slider" id="rcPitch" min="988" max="2012" value="1500"
+                           oninput="rcSliderInput(this,'rcPitchVal')">
+                    <span class="vs-value" id="rcPitchVal">1500</span>
+                </div>
+                <div class="vs-row">
+                    <span class="vs-label">YAW</span>
+                    <input type="range" class="vs-slider" id="rcYaw" min="988" max="2012" value="1500"
+                           oninput="rcSliderInput(this,'rcYawVal')">
+                    <span class="vs-value" id="rcYawVal">1500</span>
+                </div>
+                <div class="vs-row">
+                    <span class="vs-label">GAMEPAD</span>
+                    <input type="checkbox" id="rcGamepad" style="accent-color:var(--text-accent);">
+                    <span class="vs-value" id="rcGamepadName"
+                          style="width:auto;flex:1;text-align:left;">no detectado</span>
+                </div>
+                <div class="vs-row" style="justify-content:flex-end;gap:8px;padding-top:4px;">
+                    <span class="rc-warn">⚠ protocolo TX12 sin validar (docs/RC_INJECTION.md)</span>
+                    <button class="vc-btn vc-btn-primary" onclick="rcCenter()">◎ Center</button>
+                    <button class="vc-btn vc-btn-primary" id="btnRcToggle"
+                            onclick="rcToggle()">▶ Enable RC</button>
+                </div>
+            </div>
+
             <!-- Video Settings Panel (collapsible) -->
             <div class="video-settings-panel" id="videoSettingsPanel">
                 <div class="vs-row">
@@ -378,6 +439,8 @@
                     <span class="vc-badge" id="vcBadge">IDLE</span>
                     <button class="vc-btn vc-btn-primary" id="btnAI"
                             onclick="toggleYoloPanel()" title="AI Vision" style="padding:5px 10px;">AI</button>
+                    <button class="vc-btn vc-btn-primary" id="btnRC"
+                            onclick="toggleRcPanel()" title="RC command injection" style="padding:5px 10px;">RC</button>
                     <button class="vc-btn vc-btn-primary" id="btnSettings"
                             onclick="toggleVideoSettings()" title="Video settings" style="padding:5px 10px;">⚙</button>
                 </div>
@@ -445,9 +508,12 @@
         window.toggleYoloPanel = function () {
             const panel = document.getElementById('yoloPanel');
             const isOpen = panel.classList.toggle('open');
-            // Cerrar settings si se abre el panel AI
-            if (isOpen) document.getElementById('videoSettingsPanel').classList.remove('open');
-            if (isOpen) loadVisionModels();
+            // Solo un panel abierto a la vez
+            if (isOpen) {
+                document.getElementById('videoSettingsPanel').classList.remove('open');
+                document.getElementById('rcPanel').classList.remove('open');
+                loadVisionModels();
+            }
         };
 
         function fillModelSelect(selId, models, preferred) {
@@ -539,9 +605,129 @@
         window.toggleVideoSettings = function () {
             const panel = document.getElementById('videoSettingsPanel');
             const isOpen = panel.classList.toggle('open');
-            // Cerrar YOLO si se abre settings
-            if (isOpen) document.getElementById('yoloPanel').classList.remove('open');
+            // Solo un panel abierto a la vez
+            if (isOpen) {
+                document.getElementById('yoloPanel').classList.remove('open');
+                document.getElementById('rcPanel').classList.remove('open');
+            }
         };
+
+        // ── RC Inject panel (Fase 3) ─────────────────
+        // Envío continuo a 10 Hz por WS: el deadman del backend (500 ms)
+        // corta a failsafe si el navegador muere o se pierde la conexión.
+        let rcEnabled   = false;
+        let rcWs        = null;
+        let rcSendTimer = null;
+        let rcPollTimer = null;
+
+        window.toggleRcPanel = function () {
+            const panel = document.getElementById('rcPanel');
+            const isOpen = panel.classList.toggle('open');
+            if (isOpen) {
+                document.getElementById('yoloPanel').classList.remove('open');
+                document.getElementById('videoSettingsPanel').classList.remove('open');
+            }
+        };
+
+        window.rcSliderInput = function (el, valId) {
+            document.getElementById(valId).textContent = el.value;
+        };
+
+        function rcSetSliders(ch) {
+            const map = { rcRoll: ch[0], rcPitch: ch[1], rcThr: ch[2], rcYaw: ch[3] };
+            for (const [id, us] of Object.entries(map)) {
+                document.getElementById(id).value = us;
+                document.getElementById(id + 'Val').textContent = Math.round(us);
+            }
+        }
+
+        function rcReadChannels() {
+            // Gamepad Mode 2: stick izq = throttle/yaw, stick der = roll/pitch
+            if (document.getElementById('rcGamepad').checked) {
+                const gp = navigator.getGamepads?.()[0];
+                if (gp) {
+                    const toUs  = v => Math.max(988, Math.min(2012, Math.round(1500 + v * 512)));
+                    const ch = {
+                        throttle: toUs(-gp.axes[1]),
+                        yaw:      toUs(gp.axes[0]),
+                        roll:     toUs(gp.axes[2] ?? 0),
+                        pitch:    toUs(-(gp.axes[3] ?? 0)),
+                    };
+                    rcSetSliders([ch.roll, ch.pitch, ch.throttle, ch.yaw]);
+                    return ch;
+                }
+            }
+            return {
+                throttle: parseInt(document.getElementById('rcThr').value),
+                roll:     parseInt(document.getElementById('rcRoll').value),
+                pitch:    parseInt(document.getElementById('rcPitch').value),
+                yaw:      parseInt(document.getElementById('rcYaw').value),
+            };
+        }
+
+        function rcConnectWs() {
+            rcWs = new WebSocket(`ws://${location.host}/ws/rc`);
+            rcWs.onclose = () => { rcWs = null; };
+        }
+
+        window.rcToggle = async function () {
+            const btn = document.getElementById('btnRcToggle');
+            try {
+                const r = await fetch('/api/rc/config', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ enabled: !rcEnabled, rate_hz: 50, deadman_ms: 500 }),
+                });
+                const data = await r.json();
+                if (!r.ok) { console.error('[RC]', data.error); return; }
+                rcEnabled = data.enabled;
+            } catch (e) { console.error('[RC]', e); return; }
+
+            btn.textContent = rcEnabled ? '■ Disable RC' : '▶ Enable RC';
+            btn.classList.toggle('active', rcEnabled);
+            if (rcEnabled) {
+                rcSetSliders([1500, 1500, 988, 1500]);  // arranca en failsafe
+                rcConnectWs();
+                rcSendTimer = setInterval(() => {
+                    if (!rcWs || rcWs.readyState !== WebSocket.OPEN) {
+                        if (!rcWs) rcConnectWs();
+                        return;
+                    }
+                    rcWs.send(JSON.stringify({ channels: rcReadChannels() }));
+                }, 100);
+                rcPollTimer = setInterval(pollRcStatus, 1000);
+            } else {
+                clearInterval(rcSendTimer); rcSendTimer = null;
+                clearInterval(rcPollTimer); rcPollTimer = null;
+                if (rcWs) { rcWs.close(); rcWs = null; }
+                document.getElementById('rcFsBadge').textContent = 'OFF';
+                document.getElementById('rcFsBadge').className = 'rc-fs-badge';
+            }
+        };
+
+        window.rcCenter = async function () {
+            rcSetSliders([1500, 1500, 988, 1500]);
+            try { await fetch('/api/rc/center', { method: 'POST' }); } catch (_) {}
+        };
+
+        async function pollRcStatus() {
+            try {
+                const r = await fetch('/api/rc/status');
+                const s = await r.json();
+                document.getElementById('rcFrames').textContent = s.frames_sent ?? 0;
+                const badge = document.getElementById('rcFsBadge');
+                if (!s.enabled)             { badge.textContent = 'OFF';      badge.className = 'rc-fs-badge'; }
+                else if (s.failsafe_active) { badge.textContent = 'FAILSAFE'; badge.className = 'rc-fs-badge failsafe'; }
+                else                        { badge.textContent = 'LIVE';     badge.className = 'rc-fs-badge live'; }
+            } catch (_) {}
+        }
+
+        window.addEventListener('gamepadconnected', (e) => {
+            document.getElementById('rcGamepadName').textContent = e.gamepad.id.slice(0, 40);
+        });
+        window.addEventListener('gamepaddisconnected', () => {
+            document.getElementById('rcGamepadName').textContent = 'no detectado';
+            document.getElementById('rcGamepad').checked = false;
+        });
 
         window.vsUpdateValue = function (el, valId) {
             document.getElementById(valId).textContent = el.value;

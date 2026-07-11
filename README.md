@@ -1,10 +1,10 @@
 # ELRS Telemetry System — Mobula8
 
-Sistema de telemetría en tiempo real, video FPV por WebRTC y visión por
-computadora (segmentación + YOLO) para Mobula8 con RadioMaster TX12 y
-protocolo ELRS.
+Sistema de telemetría en tiempo real, video FPV por WebRTC, visión por
+computadora (segmentación + YOLO) e inyección de comandos RC para Mobula8
+con RadioMaster TX12 y protocolo ELRS.
 
-Versión actual: **2.6.0** — ver `CHANGELOG.md`.
+Versión actual: **2.7.0** — ver `CHANGELOG.md`.
 
 | Documento | Contenido |
 |-----------|-----------|
@@ -12,6 +12,7 @@ Versión actual: **2.6.0** — ver `CHANGELOG.md`.
 | `docs/SETUP.md` | Instalación del entorno (conda, CPU/GPU) |
 | `docs/VISION_PIPELINE.md` | Pipeline de visión: cascada segmentación + YOLO, latencias y política del governor |
 | `docs/YOLO_FINETUNING.md` | Guía de fine-tuning: reducir tamaño y latencia del modelo |
+| `docs/RC_INJECTION.md` | Inyección de comandos RC (Fase 3): diseño, deadman y validación de protocolo |
 | `docs/HARDWARE_VALIDATION.md` | Checklist de validación manual con hardware real |
 | `docs/ROADMAP.md` | Trabajo futuro y fases pendientes |
 | `docs/AGENT_HANDOFF.md` | Reglas de mantenimiento de la documentación |
@@ -38,6 +39,11 @@ accesible desde cualquier dispositivo en la red local.
   recomendada que calcula el `LatencyGovernor`
 - **Grabación MP4** sincronizada con el `session_id` de telemetría (frame
   limpio, sin overlay — apta para post-proceso y para datasets de fine-tuning)
+- **Inyección de comandos RC (Fase 3)**: frames CRSF RC Channels hacia la
+  TX12 por el mismo USB, con deadman switch (>500 ms sin comandos →
+  throttle al mínimo) y panel de control manual con sliders o gamepad.
+  ⚠ Pendiente de validar con hardware que EdgeTX acepte CRSF entrante
+  (ver `docs/RC_INJECTION.md`)
 - **Registra automáticamente** cada sesión de vuelo en formato JSON
 - **Explorador de vuelos**: revive cualquier vuelo con gráficas y playback del horizonte
 - **Calibración de video**: herramienta standalone para brillo/contraste/gamma/balance de blancos
@@ -64,6 +70,7 @@ backend/                     ← Código Python
 ├── vision_pipeline.py       ← Cascada de visión + LatencyGovernor
 ├── yolo_processor.py        ← Etapa de detección YOLO
 ├── segmentation_processor.py← Etapa de segmentación (opcional, previa a YOLO)
+├── command_injector.py      ← Inyección RC (CRSF 0x16 + deadman, Fase 3)
 ├── video_calibrate.py       ← Herramienta standalone de calibración de imagen
 └── video_config.json        ← Configuración de imagen (brillo, WB, etc.)
 frontend/                    ← UI web (vanilla JS, sin build)
@@ -150,11 +157,11 @@ python backend/elrs_backend.py --port COM6 --baud 115200
 Salida esperada:
 ```
 [VIDEO] Módulo de video cargado correctamente
-ELRS Telemetry Server v2.6.0 | COM6@115200 | http://localhost:8080
+ELRS Telemetry Server v2.7.0 | COM6@115200 | http://localhost:8080
 [SESSION] Nueva sesión: 20260711_180000
 [SESSION] Logs en: A:\...\logs
 [SERIAL] Conectado a COM6 @ 115200 baud
-[SERVER] ELRS Telemetry Server v2.6.0 listo
+[SERVER] ELRS Telemetry Server v2.7.0 listo
 ```
 
 Si faltan las dependencias de video, el servidor arranca igual con el módulo
@@ -227,6 +234,32 @@ modelos propios en `docs/YOLO_FINETUNING.md`.
 
 La primera activación de un modelo lo descarga automáticamente (~6 MB) si no
 está en `models/`.
+
+---
+
+## 🎮 Panel RC (inyección de comandos — Fase 3)
+
+El botón **RC** del player abre el panel de control manual: sliders
+THROTTLE/ROLL/PITCH/YAW (µs 988–2012), botón **Center** (posición segura) y
+soporte de **gamepad** (Web Gamepad API, Mode 2: stick izquierdo
+throttle/yaw, derecho roll/pitch). Al habilitarlo, la UI envía los canales
+a 10 Hz por `WS /ws/rc` y el backend los retransmite como frames CRSF a
+50 Hz hacia la TX12.
+
+Seguridad integrada:
+
+- **Deadman switch**: si el backend deja de recibir comandos >500 ms
+  (pestaña cerrada, red caída), los canales caen a failsafe — throttle al
+  mínimo, ejes centrados, aux abajo. El badge del panel muestra el estado
+  en vivo: `OFF` / `FAILSAFE` / `LIVE`.
+- Habilitar la inyección requiere el serial de la TX12 conectado (409 si no).
+- Al habilitar siempre se arranca en failsafe, nunca con valores viejos.
+
+⚠ **Pendiente de validación de protocolo**: no está confirmado que EdgeTX
+acepte CRSF entrante por USB en modo Telem Mirror. Plan de pruebas en
+`docs/HARDWARE_VALIDATION.md` §4b y diseño completo en
+`docs/RC_INJECTION.md`. Hasta validar el deadman con hardware real, no
+habilitar la inyección con el drone armado y con hélices.
 
 ---
 
@@ -332,6 +365,16 @@ Cada sesión guardada en `logs/session_YYYYMMDD_HHMMSS.json`:
 | `GET` | `/api/yolo/status` | Estado del detector (compatibilidad) |
 | `GET` | `/api/yolo/models` | Modelos de detección (compatibilidad) |
 
+### Inyección RC (Fase 3)
+
+| Método | Endpoint | Descripción |
+|--------|----------|-------------|
+| `GET` | `/api/rc/status` | Estado: enabled, deadman/failsafe, canales, frames enviados |
+| `POST` | `/api/rc/config` | `enabled`, `rate_hz`, `deadman_ms`, `sync_byte` (409 sin serial) |
+| `POST` | `/api/rc/channels` | `{"channels": {"throttle": 1600, "1": 1450}}` — alias AETR o índice 1–16, µs |
+| `POST` | `/api/rc/center` | Todos los canales a failsafe (posición segura) |
+| `WS` | `/ws/rc` | Canal continuo de baja latencia (UI/gamepad, 10 Hz) |
+
 ---
 
 ## ⌨️ Atajos de teclado
@@ -390,6 +433,21 @@ python -m serial.tools.list_ports
   la latencia del modelo: `imgsz` 416/320, apagar la segmentación, o un
   modelo optimizado (`docs/YOLO_FINETUNING.md`).
 
+### La inyección RC no mueve nada en la TX12
+- Es la incógnita de protocolo abierta de Fase 3: EdgeTX podría no aceptar
+  CRSF entrante por USB en modo Telem Mirror. Probar las tres direcciones
+  con `sync_byte` (`0xEE`/`0xEA`/`0xC8`) siguiendo
+  `docs/HARDWARE_VALIDATION.md` §4b y registrar el resultado en
+  `docs/RC_INJECTION.md` §3 (ahí está también el plan B).
+- Verificar primero lo local: `GET /api/rc/status` debe mostrar
+  `serial_connected: true`, `enabled: true` y `frames_sent` creciendo.
+
+### El panel RC queda en "FAILSAFE"
+- El deadman no está recibiendo comandos frescos (>500 ms). Con el panel
+  abierto y habilitado la UI envía a 10 Hz — si aún así queda en FAILSAFE,
+  revisar la consola del navegador (¿WebSocket `/ws/rc` cerrado?) y que no
+  haya un proxy bloqueando WebSockets.
+
 ### El panel AI muestra "Vmax HOVER" (modo stale)
 - La inferencia no está publicando resultados frescos (>1.5 s). Causas
   típicas: modelo demasiado pesado para la CPU (usar yolov8n, bajar
@@ -409,6 +467,7 @@ python -m serial.tools.list_ports
 │   ├── vision_pipeline.py   ← Cascada de visión + LatencyGovernor
 │   ├── yolo_processor.py    ← Etapa de detección YOLO
 │   ├── segmentation_processor.py ← Etapa de segmentación (opcional)
+│   ├── command_injector.py  ← Inyección RC + deadman (Fase 3)
 │   ├── video_calibrate.py   ← Calibración de imagen (standalone)
 │   └── video_config.json    ← Config de imagen generada por la calibración
 ├── frontend/                ← Interfaz web (servida por el backend)
@@ -422,6 +481,7 @@ python -m serial.tools.list_ports
 │   ├── SETUP.md             ← Guía de instalación con conda (CPU/GPU)
 │   ├── VISION_PIPELINE.md   ← Pipeline de visión y política de latencia
 │   ├── YOLO_FINETUNING.md   ← Guía de fine-tuning (tamaño y latencia)
+│   ├── RC_INJECTION.md      ← Inyección RC: diseño, deadman, protocolo
 │   ├── HARDWARE_VALIDATION.md ← Checklist de validación con hardware real
 │   ├── ROADMAP.md           ← Trabajo futuro (no mezclar con este README)
 │   └── AGENT_HANDOFF.md     ← Reglas de mantenimiento de la documentación

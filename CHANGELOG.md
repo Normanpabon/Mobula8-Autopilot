@@ -1,6 +1,49 @@
 > Las fases pendientes (Fase 3 — inyección EdgeTX, Fase 4 — vuelo autónomo)
 > y el resto del trabajo futuro viven ahora en `docs/ROADMAP.md`.
 
+## [2.7.0] — 2026-07-11
+
+### Añadido — Fase 3: Inyección de comandos RC
+
+- **`backend/command_injector.py`**: frames CRSF RC Channels Packed (0x16,
+  16 canales × 11 bits, CRC8 DVB-S2) hacia la TX12 por el mismo puerto USB
+  serial de la telemetría (handle compartido `serial_conn`, full-duplex).
+  - **Loop de envío continuo** a `rate_hz` (default 50 Hz) — CRSF es un
+    stream, no comandos sueltos; la API solo actualiza el estado de canales.
+  - **Deadman switch**: >`deadman_ms` (500) sin comandos → failsafe
+    (throttle 988 µs mínimo — al centro subiría —, roll/pitch/yaw 1500,
+    aux abajo). Aplica también antes del primer comando y al rehabilitar.
+  - Canales por alias AETR (`roll/pitch/throttle/yaw`) o índice 1–16, en
+    µs 988–2012 con clamp; mapeo a ticks `992 + (µs−1500)×8/5`.
+  - `sync_byte` configurable (`0xEE`/`0xEA`/`0xC8`) para la validación de
+    protocolo pendiente (¿acepta EdgeTX CRSF entrante en Telem Mirror?).
+- **Endpoints**: `GET /api/rc/status`, `POST /api/rc/config` (409 si el
+  serial no está conectado), `POST /api/rc/channels`, `POST /api/rc/center`
+  y `WS /ws/rc` (canal de baja latencia del panel/gamepad).
+- **Panel RC en la UI** (botón RC en la barra del player): sliders AETR,
+  botón Center, envío continuo a 10 Hz por WS (alimenta el deadman),
+  soporte Web Gamepad API (Mode 2) y badge de estado OFF/FAILSAFE/LIVE.
+- **`docs/RC_INJECTION.md`**: diseño, garantías del deadman, la incógnita
+  de protocolo con su plan B (Joystick USB HID / módulo ELRS externo) y
+  reglas de seguridad para las pruebas con hardware.
+- **`docs/HARDWARE_VALIDATION.md` §4b**: checklist de validación de la
+  inyección (solo TX12 → drone sin hélices → medir latencia de comando
+  para recalibrar el `reaction_time_ms` del LatencyGovernor).
+
+### Verificación
+
+- Unit tests con serial loopback (`loop://`): estructura y CRC del frame
+  (idéntico al parser CRSF existente), round-trip de 16 canales, clamps,
+  deadman observado en los bytes transmitidos (throttle 1700 → 988 tras
+  300 ms sin comandos), ~100 Hz de envío sostenido.
+- Endpoints y `WS /ws/rc` ejercitados con `TestClient`: 409 sin serial,
+  validación de `sync_byte` y canal fuera de rango (400), alias AETR.
+- `py_compile` + `node --check` del JS inline.
+- Pendiente: **validación de protocolo con la TX12 real** — el único ítem
+  de Fase 3 que exige hardware (`ROADMAP.md`, `HARDWARE_VALIDATION.md` §4b).
+
+---
+
 ## [2.6.0] — 2026-07-11
 
 ### Añadido — Pipeline de visión en cascada (segmentación + YOLO)

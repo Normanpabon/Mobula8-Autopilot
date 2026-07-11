@@ -1,5 +1,5 @@
 """
-ELRS Backend WebSocket Server v2.6.0
+ELRS Backend WebSocket Server v2.7.0
 """
 import asyncio, json, argparse
 from contextlib import asynccontextmanager
@@ -18,6 +18,7 @@ from pydantic import BaseModel
 import uvicorn
 
 from session_manager import SessionManager
+from command_injector import CommandInjector
 
 CRSF_SYNC = 0xEA
 
@@ -101,19 +102,33 @@ async def lifespan(app: FastAPI):
     parser.add_argument("--baud", type=int, default=115200)
     args, _ = parser.parse_known_args()
     asyncio.create_task(serial_reader_task(args.port, args.baud))
-    print("[SERVER] ELRS Telemetry Server v2.6.0 listo")
+    injector.start()
+    print("[SERVER] ELRS Telemetry Server v2.7.0 listo")
     yield
     # Shutdown
+    await injector.stop()
     if session and session.current_frame_count > 0:
         print("[SERVER] Guardando sesión..."); session.save()
 
-app = FastAPI(title="ELRS Telemetry Server", version="2.6.0", lifespan=lifespan)
+app = FastAPI(title="ELRS Telemetry Server", version="2.7.0", lifespan=lifespan)
 manager = ConnectionManager()
 session: Optional[SessionManager] = None
 telemetry_history = deque(maxlen=500)
 system_status = {"serial_port": None, "baud_rate": None, "connected": False,
                  "frames_received": 0, "uptime_seconds": 0, "start_time": None,
                  "current_session_id": None, "current_session_frames": 0}
+
+# Handle serial compartido: el reader lo abre, el CommandInjector escribe por él
+serial_conn = {"ser": None}
+
+def _rc_serial_write(frame: bytes) -> bool:
+    ser = serial_conn["ser"]
+    if ser is None or not ser.is_open:
+        return False
+    ser.write(frame)
+    return True
+
+injector = CommandInjector(write_fn=_rc_serial_write)
 
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True,
                    allow_methods=["*"], allow_headers=["*"])
@@ -175,6 +190,15 @@ class GovernorConfigRequest(BaseModel):
     safety_distance_m: float = 3.0
     reaction_time_ms:  float = 250.0
 
+class RCConfigRequest(BaseModel):
+    enabled:    bool  = False
+    rate_hz:    float = 50.0
+    deadman_ms: float = 500.0
+    sync_byte:  str   = "0xEE"   # 0xEE módulo TX | 0xEA radio | 0xC8 FC (validación de protocolo)
+
+class RCChannelsRequest(BaseModel):
+    channels: dict   # {"1": 1500, ..., "roll"/"pitch"/"throttle"/"yaw": µs}
+
 
 # ──────────────────────────────────────────────────────────────
 # Serial reader
@@ -183,6 +207,7 @@ async def serial_reader_task(port: str, baud: int):
     global session
     try:
         ser = serial.Serial(port, baud, timeout=0.001)
+        serial_conn["ser"] = ser
         system_status.update({"connected": True, "serial_port": port, "baud_rate": baud})
         print(f"[SERIAL] Conectado a {port} @ {baud} baud")
     except Exception as e:
@@ -455,6 +480,70 @@ async def update_yolo_config(req: YOLOConfigRequest):
     return JSONResponse({"updated": True, **yolo.status})
 
 
+# ──────────────────────────────────────────────────────────────
+# RC injection routes (Fase 3 — pendiente validación de protocolo,
+# ver docs/RC_INJECTION.md)
+# ──────────────────────────────────────────────────────────────
+@app.get("/api/rc/status")
+async def get_rc_status():
+    return JSONResponse({**injector.status,
+                         "serial_connected": system_status["connected"]})
+
+@app.post("/api/rc/config")
+async def update_rc_config(req: RCConfigRequest):
+    if req.enabled and not system_status["connected"]:
+        return JSONResponse({"error": "Serial no conectado — la inyección requiere la TX12 por USB"},
+                            status_code=409)
+    try:
+        sync = int(req.sync_byte, 16)
+    except ValueError:
+        return JSONResponse({"error": f"sync_byte inválido: {req.sync_byte}"}, status_code=400)
+    if sync not in (0xEE, 0xEA, 0xC8):
+        return JSONResponse({"error": "sync_byte debe ser 0xEE, 0xEA o 0xC8"}, status_code=400)
+    injector.rate_hz    = max(1.0, min(250.0, req.rate_hz))
+    injector.deadman_ms = max(100.0, min(5000.0, req.deadman_ms))
+    injector.sync_byte  = sync
+    if req.enabled and not injector.enabled:
+        injector.reset()   # arranca en failsafe hasta el primer comando
+    injector.enabled = req.enabled
+    return JSONResponse({"updated": True, **injector.status})
+
+@app.post("/api/rc/channels")
+async def set_rc_channels(req: RCChannelsRequest):
+    try:
+        applied = injector.set_channels(req.channels)
+    except (ValueError, TypeError) as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    return JSONResponse({"updated": True, "applied": applied,
+                         "failsafe_active": injector.failsafe_active})
+
+@app.post("/api/rc/center")
+async def center_rc_channels():
+    injector.center()
+    return JSONResponse({"centered": True, "channels_us": injector.status["channels_us"]})
+
+@app.websocket("/ws/rc")
+async def rc_websocket(ws: WebSocket):
+    """Canal de baja latencia para el panel de control manual / gamepad.
+    Mensajes: {"channels": {...}} — misma forma que POST /api/rc/channels.
+    El deadman del injector cubre la desconexión del cliente."""
+    await ws.accept()
+    try:
+        while True:
+            msg = await ws.receive_text()
+            try:
+                data = json.loads(msg)
+                applied = injector.set_channels(data.get("channels", {}))
+                await ws.send_text(json.dumps({
+                    "ok": True, "applied": {str(k): v for k, v in applied.items()},
+                    "failsafe_active": injector.failsafe_active,
+                    "enabled": injector.enabled}))
+            except (ValueError, TypeError, KeyError) as e:
+                await ws.send_text(json.dumps({"ok": False, "error": str(e)}))
+    except WebSocketDisconnect:
+        pass
+
+
 @app.post("/offer")
 async def webrtc_offer(request: FRequest):
     if not VIDEO_AVAILABLE or not video:
@@ -502,15 +591,15 @@ if frontend_path.exists():
         return FileResponse(index) if index.exists() else JSONResponse({"error": "Not found"}, 404)
 else:
     @app.get("/")
-    async def root(): return JSONResponse({"message": "ELRS v2.6.0", "error": "frontend/ not found"})
+    async def root(): return JSONResponse({"message": "ELRS v2.7.0", "error": "frontend/ not found"})
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="ELRS Telemetry Server v2.6.0")
+    parser = argparse.ArgumentParser(description="ELRS Telemetry Server v2.7.0")
     parser.add_argument("--port", default="COM6")
     parser.add_argument("--baud", type=int, default=115200)
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--web-port", type=int, default=8080)
     args = parser.parse_args()
-    print(f"ELRS Telemetry Server v2.6.0 | {args.port}@{args.baud} | http://localhost:{args.web_port}")
+    print(f"ELRS Telemetry Server v2.7.0 | {args.port}@{args.baud} | http://localhost:{args.web_port}")
     uvicorn.run(app, host=args.host, port=args.web_port, log_level="warning")
