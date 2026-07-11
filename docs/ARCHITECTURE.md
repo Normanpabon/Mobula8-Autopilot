@@ -2,7 +2,7 @@
 
 Resumen arquitectónico del sistema para que un desarrollador nuevo pueda
 incorporarse al proyecto sin más contexto que este documento, `SETUP.md`
-(instalación) y el `README.md` (uso). Última actualización: v2.5.0.
+(instalación) y el `README.md` (uso). Última actualización: v2.6.0.
 
 ---
 
@@ -17,8 +17,12 @@ laptop Windows y hace tres cosas:
 2. **Video FPV**: captura el video analógico del drone via una capturadora
    USB (EasyCap) y lo sirve al navegador por WebRTC, con grabación MP4
    opcional sincronizada con la sesión de telemetría.
-3. **Visión (YOLO)**: opcionalmente pasa cada frame de video por YOLOv8
-   antes de enviarlo, dibujando las detecciones en el stream.
+3. **Visión (segmentación + YOLO)**: pipeline opcional de dos etapas
+   conmutables — segmentación de regiones y detección de objetos — que corre
+   desacoplado del stream y dibuja sus resultados (y la latencia medida)
+   sobre el video. Un `LatencyGovernor` traduce esa latencia en una
+   velocidad máxima recomendada para el futuro autopilot
+   (ver `docs/VISION_PIPELINE.md`).
 
 El objetivo de largo plazo (ver `ROADMAP.md`) es cerrar el lazo:
 telemetría + visión → decisión → inyección de comandos RC de vuelta a la
@@ -37,9 +41,12 @@ TX12 (vuelo asistido/autónomo).
         │                                        │ WS    │
         └──► SessionManager ──► logs/*.json      │       │
                                                  │       │
-   VideoCapture ─► correcciones ─► [YOLO] ─► FPVVideoTrack ─► WebRTC (aiortc)
-        │            (WB/gamma)               │                   │
-        └────────► VideoRecorder ─► logs/video/*.mp4              │
+   VideoCapture ─► correcciones ─► overlay ─► FPVVideoTrack ─► WebRTC (aiortc)
+        │            (WB/gamma)       ▲                            │
+        │      VisionPipeline (loop propio, 1 worker):             │
+        ├────► [segmentación] ─► [YOLO] ─► LatencyGovernor         │
+        │                                                          │
+        └────────► VideoRecorder ─► logs/video/*.mp4               │
                                    └─────────────────────┘        │
                                             ▲                     ▼
                                    ┌─────────────────────────────────────┐
@@ -52,8 +59,9 @@ TX12 (vuelo asistido/autónomo).
 
 Todo corre en un solo proceso (`python backend/elrs_backend.py`): FastAPI
 sirve API + frontend estático, el lector serial es una task asyncio, y la
-captura de video corre en el mismo event loop con la inferencia YOLO
-delegada a un thread.
+captura de video corre en el mismo event loop. La inferencia de visión corre
+en un loop asyncio propio que delega a un thread (1 worker) y **no bloquea
+el stream**: el track WebRTC solo dibuja el último resultado publicado.
 
 ## 3. Módulos del backend (`backend/`)
 
@@ -61,8 +69,10 @@ delegada a un thread.
 |--------|-----------------|--------------|
 | `elrs_backend.py` | **Punto de entrada.** Servidor FastAPI: parseo CRSF, WebSocket de telemetría, ~25 endpoints REST, servido del frontend. Carga el módulo de video de forma opcional (si falla, solo se desactiva el video). | `parse_crsf_frame()`, `crc8_dvb_s2()` (tabla precomputada), `ConnectionManager` (broadcast WS), `serial_reader_task()`, patrón `lifespan` |
 | `session_manager.py` | Persistencia de sesiones de vuelo. Acumula frames en memoria y al cerrar calcula el resumen (voltajes, RSSI, LQ, actitud) y guarda JSON en `logs/`. | `SessionManager`, `save()`, `_compute_summary()` |
-| `video_streamer.py` | Pipeline completo de video: enumeración de capturadoras, captura OpenCV, correcciones de imagen, track WebRTC y grabación MP4. | `DeviceManager` (enumeración paralela MSMF→DSHOW, nombres via `Win32_PnPEntity`), `VideoCapture`, `apply_white_balance()`, `FPVVideoTrack` (recibe un `frame_getter` async — desacoplado de la fuente), `WebRTCManager` (un `RTCPeerConnection` por cliente), `VideoRecorder`, `VideoStreamer` (fachada) |
-| `yolo_processor.py` | Inferencia YOLOv8 asíncrona. Recibe frame BGR, devuelve frame anotado. No bloquea el event loop (ThreadPoolExecutor de 1 worker). Falla silenciosamente si `ultralytics` no está instalado. | `YOLOProcessor`, `process_async()`, `list_local_models()` |
+| `video_streamer.py` | Pipeline completo de video: enumeración de capturadoras, captura OpenCV, correcciones de imagen, track WebRTC y grabación MP4. Conecta el `VisionPipeline` al ciclo de vida de la captura. | `DeviceManager` (enumeración paralela MSMF→DSHOW, nombres via `Win32_PnPEntity`), `VideoCapture`, `apply_white_balance()`, `FPVVideoTrack` (recibe un `frame_getter` async — desacoplado de la fuente), `WebRTCManager` (un `RTCPeerConnection` por cliente), `VideoRecorder`, `VideoStreamer` (fachada; `.yolo` es alias del detector para compatibilidad) |
+| `vision_pipeline.py` | Orquestador de la cascada de visión: loop de inferencia desacoplado del stream (ThreadPoolExecutor de 1 worker), overlay barato (`annotate()`, solo cv2), y política de latencia para el futuro autopilot. Ver `docs/VISION_PIPELINE.md`. | `VisionPipeline`, `VisionResult`, `LatencyGovernor` (v_max = distancia de seguridad / latencia total; modos off/warming_up/active/stale) |
+| `yolo_processor.py` | Etapa de detección: wrapper síncrono del modelo YOLO (`.pt`/`.onnx`/`.engine`), `imgsz` configurable. Falla silenciosamente si `ultralytics` no está instalado. | `YOLOProcessor`, `infer()` (devuelve detecciones con bbox en píxeles), `list_local_models()` (excluye `-seg`) |
+| `segmentation_processor.py` | Etapa opcional de segmentación previa a la detección: máscara binaria de regiones con objetos, dilatada con margen. `focus_mode="mask"` suprime el fondo antes del detector; `"overlay"` solo dibuja. | `SegmentationProcessor`, `segment()`, `apply_focus()`, `list_local_models()` (solo `-seg`) |
 | `video_calibrate.py` | Herramienta standalone (ventana OpenCV) para calibrar brillo/contraste/gamma/balance de blancos. Guarda en `video_config.json`, que el streamer lee. | Presets WB (`anti_magenta` para el tinte de la EasyCap), ajuste por canal con teclas |
 
 Convención de rutas: los módulos usan `Path(__file__).resolve().parent.parent`
@@ -106,10 +116,12 @@ directamente por FastAPI. Decisión tomada en v2.0.0 al eliminar React
 
 | Librería | Para qué se usa aquí |
 |----------|----------------------|
-| **ultralytics** | Carga e inferencia de modelos YOLOv8/v11 (`.pt`), anotación de detecciones con `results[0].plot()`. Arrastra PyTorch; para GPU instalar torch con CUDA antes (ver `SETUP.md`). |
+| **ultralytics** | Carga e inferencia de modelos YOLOv8/v11 de detección y segmentación (`.pt`, y `.onnx`/`.engine`/OpenVINO exportados — ver `docs/YOLO_FINETUNING.md`). Arrastra PyTorch; para GPU instalar torch con CUDA antes (ver `SETUP.md`). |
 
-El servidor arranca sin este grupo: `yolo_processor` se importa de forma
-opcional y los endpoints `/api/yolo/*` responden "no disponible".
+El servidor arranca sin este grupo: los procesadores de visión se importan
+de forma opcional y los endpoints `/api/vision/*`, `/api/yolo/*` y
+`/api/segmentation/*` responden "no disponible". Los extras de optimización
+(`onnxruntime`, `openvino`) solo hacen falta para los formatos exportados.
 
 ### Frontend
 
@@ -139,7 +151,15 @@ gráficas), **ES modules** (organización del código).
 | EasyCap (digitalización NTSC) | ~50–100 ms |
 | Pipeline aiortc (encode + red local) | ~150–250 ms |
 | Telemetría CRSF (ratio 1:8 + refresh Fast) | ~30–60 ms |
-| Inferencia YOLOv8n (CPU laptop) | ~50–150 ms/frame |
+| Detección YOLOv8n (CPU laptop, imgsz 640/416) | ~120–150 / ~50–80 ms/frame |
+| Segmentación yolov8n-seg (CPU, imgsz 416) | ~55–90 ms/frame |
+| Cascada seg + det | ~135–175 ms/frame |
+
+Desde v2.6.0 la inferencia **no** suma latencia al stream (corre
+desacoplada); lo que introduce es *edad* en los resultados de visión. El
+`LatencyGovernor` convierte la latencia total cámara→decisión→drone en una
+velocidad máxima recomendada, y encender más etapas la reduce — desglose
+completo y política del autopilot en `docs/VISION_PIPELINE.md`.
 
 Implicación: la telemetría llega antes que el video. Cualquier lógica de
 control futura (Fase 3/4) debe decidir sobre telemetría y usar la visión

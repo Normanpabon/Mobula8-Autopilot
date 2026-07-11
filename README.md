@@ -1,14 +1,18 @@
 # ELRS Telemetry System — Mobula8
 
 Sistema de telemetría en tiempo real, video FPV por WebRTC y visión por
-computadora (YOLO) para Mobula8 con RadioMaster TX12 y protocolo ELRS.
+computadora (segmentación + YOLO) para Mobula8 con RadioMaster TX12 y
+protocolo ELRS.
 
-Versión actual: **2.5.0** — ver `CHANGELOG.md`.
+Versión actual: **2.6.0** — ver `CHANGELOG.md`.
 
 | Documento | Contenido |
 |-----------|-----------|
 | `docs/ARCHITECTURE.md` | Resumen arquitectónico: módulos, librerías y su propósito, flujo de datos — **empezar aquí si eres nuevo en el proyecto** |
 | `docs/SETUP.md` | Instalación del entorno (conda, CPU/GPU) |
+| `docs/VISION_PIPELINE.md` | Pipeline de visión: cascada segmentación + YOLO, latencias y política del governor |
+| `docs/YOLO_FINETUNING.md` | Guía de fine-tuning: reducir tamaño y latencia del modelo |
+| `docs/HARDWARE_VALIDATION.md` | Checklist de validación manual con hardware real |
 | `docs/ROADMAP.md` | Trabajo futuro y fases pendientes |
 | `docs/AGENT_HANDOFF.md` | Reglas de mantenimiento de la documentación |
 | `CHANGELOG.md` | Historial de cambios |
@@ -27,8 +31,13 @@ accesible desde cualquier dispositivo en la red local.
 - **Captura telemetría CRSF** directamente desde el control remoto via USB
 - **Visualiza en tiempo real**: horizonte artificial, batería, señal RF, modos de vuelo
 - **Video FPV en el navegador**: stream WebRTC de baja latencia desde la capturadora USB
-- **Detección de objetos (YOLO)**: inferencia YOLOv8 opcional sobre el feed FPV, con panel AI en la UI
-- **Grabación MP4** sincronizada con el `session_id` de telemetría
+- **Visión por computadora**: cascada opcional de segmentación + detección
+  YOLO sobre el feed FPV, con etapas que se encienden/apagan por separado.
+  La inferencia corre desacoplada del stream (el video no pierde FPS) y el
+  overlay muestra detecciones, latencia por etapa y la velocidad máxima
+  recomendada que calcula el `LatencyGovernor`
+- **Grabación MP4** sincronizada con el `session_id` de telemetría (frame
+  limpio, sin overlay — apta para post-proceso y para datasets de fine-tuning)
 - **Registra automáticamente** cada sesión de vuelo en formato JSON
 - **Explorador de vuelos**: revive cualquier vuelo con gráficas y playback del horizonte
 - **Calibración de video**: herramienta standalone para brillo/contraste/gamma/balance de blancos
@@ -36,7 +45,7 @@ accesible desde cualquier dispositivo en la red local.
 ### Stack técnico
 - **Backend**: Python 3.11 / FastAPI (lifespan) / WebSocket / pySerial
 - **Video**: OpenCV (captura MSMF/DSHOW) + aiortc (WebRTC) + PyAV
-- **Visión**: ultralytics YOLOv8 (opcional)
+- **Visión**: ultralytics YOLOv8 — detección + segmentación (opcional)
 - **Frontend**: Vanilla JavaScript (sin dependencias npm)
 - **Protocolo**: CRSF sobre USB Serial (EdgeTX Telem Mirror, sync byte `0xEA`)
 - **Almacenamiento**: JSON plano en disco (`logs/`), video MP4 en `logs/video/`
@@ -52,7 +61,9 @@ backend/                     ← Código Python
 ├── elrs_backend.py          ← Servidor principal (FastAPI, EJECUTAR ESTE)
 ├── session_manager.py       ← Gestión de sesiones de vuelo (JSON)
 ├── video_streamer.py        ← Captura USB + WebRTC + grabación MP4
-├── yolo_processor.py        ← Inferencia YOLOv8 sobre el pipeline de video
+├── vision_pipeline.py       ← Cascada de visión + LatencyGovernor
+├── yolo_processor.py        ← Etapa de detección YOLO
+├── segmentation_processor.py← Etapa de segmentación (opcional, previa a YOLO)
 ├── video_calibrate.py       ← Herramienta standalone de calibración de imagen
 └── video_config.json        ← Configuración de imagen (brillo, WB, etc.)
 frontend/                    ← UI web (vanilla JS, sin build)
@@ -68,16 +79,19 @@ frontend/                    ← UI web (vanilla JS, sin build)
         ├── PerformanceMonitor.js ← Monitor de latencia (F2)
         ├── VideoPlayer.js        ← Cliente WebRTC (señalización + reconexión)
         └── Utils.js
-docs/                        ← ARCHITECTURE, SETUP, ROADMAP, AGENT_HANDOFF
-models/                      ← Modelos .pt personalizados (se crea automático)
+docs/                        ← ARCHITECTURE, SETUP, VISION_PIPELINE,
+                               YOLO_FINETUNING, ROADMAP, AGENT_HANDOFF
+models/                      ← Modelos .pt/.onnx propios (se crea automático)
 logs/
 ├── session_YYYYMMDD_HHMMSS.json ← Sesiones guardadas
 └── video/                        ← Grabaciones MP4
 ```
 
-Pipeline de video: `captura (OpenCV) → correcciones (WB/gamma) → [YOLO si
-está activo] → WebRTC (aiortc) / grabación MP4`. Diagrama completo de flujo
-de datos en `docs/ARCHITECTURE.md`.
+Pipeline de video: `captura (OpenCV) → correcciones (WB/gamma) → overlay de
+visión → WebRTC (aiortc) / grabación MP4`. La inferencia
+(`[segmentación] → [YOLO]`) corre en un loop desacoplado que publica
+resultados; el stream solo dibuja el último publicado. Diagramas completos
+en `docs/ARCHITECTURE.md` y `docs/VISION_PIPELINE.md`.
 
 ---
 
@@ -98,7 +112,7 @@ Ver `docs/SETUP.md` para la guía completa con conda (Python 3.11, CPU y GPU).
 
 ```bash
 pip install -r requirements.txt        # servidor, telemetría y video
-pip install -r requirements-yolo.txt   # opcional: pipeline YOLO
+pip install -r requirements-yolo.txt   # opcional: pipeline de visión
 ```
 
 Para GPU con CUDA, instalar torch antes de `requirements-yolo.txt`
@@ -136,11 +150,11 @@ python backend/elrs_backend.py --port COM6 --baud 115200
 Salida esperada:
 ```
 [VIDEO] Módulo de video cargado correctamente
-ELRS Telemetry Server v2.5.0 | COM6@115200 | http://localhost:8080
-[SESSION] Nueva sesión: 20260710_180000
+ELRS Telemetry Server v2.6.0 | COM6@115200 | http://localhost:8080
+[SESSION] Nueva sesión: 20260711_180000
 [SESSION] Logs en: A:\...\logs
 [SERIAL] Conectado a COM6 @ 115200 baud
-[SERVER] ELRS Telemetry Server v2.5.0 listo
+[SERVER] ELRS Telemetry Server v2.6.0 listo
 ```
 
 Si faltan las dependencias de video, el servidor arranca igual con el módulo
@@ -174,8 +188,7 @@ http://192.168.X.X:8080
 En la UI: seleccionar dispositivo y resolución en la barra de controles del
 player, **▶ Start** para iniciar el stream, **⏺ Record** para grabar MP4
 sincronizado con la sesión. El botón **⚙** abre el panel de ajustes de imagen
-(brightness/contrast/saturation/gamma) y el botón **AI** el panel YOLO
-(modelo, confidence, toggle).
+(brightness/contrast/saturation/gamma) y el botón **AI** el panel de visión.
 
 Para calibrar la imagen fuera del servidor (ventana OpenCV con histograma):
 
@@ -191,6 +204,29 @@ wb_g 1.10, wb_b 0.75`) · `H` ecualización de histograma · `N` NTSC/PAL ·
 
 El balance de blancos es por software (el driver de la EasyCap no acepta
 `CAP_PROP_WB_*`) y se aplica también al stream del servidor.
+
+---
+
+## 🧠 Panel AI (visión por computadora)
+
+El panel **AI** del player controla las dos etapas del pipeline de visión,
+cada una con su toggle independiente:
+
+- **DETECT** (YOLO): modelo de detección (`yolov8n/s/m` o los `.pt`/`.onnx`
+  propios colocados en `models/`), slider de confidence.
+- **SEGMENT**: modelo de segmentación (`yolov8n-seg` o propios con `-seg` en
+  el nombre) y modo de foco: `mask` suprime el fondo antes del detector
+  (cascada), `overlay` solo dibuja los contornos.
+
+La cabecera del panel muestra en vivo: FPS de visión, detecciones, latencia
+del pipeline (ms) y **Vmax** — la velocidad máxima recomendada que calcula el
+`LatencyGovernor` a partir de la latencia total (más etapas encendidas →
+más latencia → menor Vmax). El mismo HUD se dibuja sobre el stream. Detalles
+y política completa en `docs/VISION_PIPELINE.md`; cómo entrenar y optimizar
+modelos propios en `docs/YOLO_FINETUNING.md`.
+
+La primera activación de un modelo lo descarga automáticamente (~6 MB) si no
+está en `models/`.
 
 ---
 
@@ -275,7 +311,7 @@ Cada sesión guardada en `logs/session_YYYYMMDD_HHMMSS.json`:
 | Método | Endpoint | Descripción |
 |--------|----------|-------------|
 | `GET` | `/api/video/devices` | Lista capturadoras disponibles |
-| `GET` | `/api/video/status` | Estado del stream y grabación |
+| `GET` | `/api/video/status` | Estado del stream, grabación y visión |
 | `GET` | `/api/video/config` | Configuración de imagen actual |
 | `POST` | `/api/video/config` | Actualiza `backend/video_config.json` y aplica al vuelo |
 | `POST` | `/api/video/start` | Iniciar captura (`device_id`, `width`, `height`, `fps`) |
@@ -284,13 +320,17 @@ Cada sesión guardada en `logs/session_YYYYMMDD_HHMMSS.json`:
 | `POST` | `/api/video/recording/stop` | Detener grabación |
 | `POST` | `/offer` | Señalización WebRTC (SDP offer → answer) |
 
-### Visión (YOLO)
+### Visión (segmentación + YOLO + governor)
 
 | Método | Endpoint | Descripción |
 |--------|----------|-------------|
-| `GET` | `/api/yolo/status` | Estado del procesador (FPS de inferencia, detecciones, modelo) |
-| `GET` | `/api/yolo/models` | Modelos default + archivos `.pt` en `models/` |
-| `POST` | `/api/yolo/config` | Activa/desactiva YOLO, cambia modelo, ajusta confidence |
+| `GET` | `/api/vision/status` | Estado completo: etapas, latencias por etapa, FPS de visión, governor |
+| `GET` | `/api/vision/models` | Modelos disponibles por etapa (defaults + `models/`) |
+| `POST` | `/api/segmentation/config` | Etapa de segmentación: `enabled`, `model`, `confidence`, `focus_mode` (`mask`/`overlay`), `imgsz` |
+| `POST` | `/api/yolo/config` | Etapa de detección: `enabled`, `model`, `confidence`, `imgsz` |
+| `POST` | `/api/vision/governor` | Política de latencia: `safety_distance_m`, `reaction_time_ms` |
+| `GET` | `/api/yolo/status` | Estado del detector (compatibilidad) |
+| `GET` | `/api/yolo/models` | Modelos de detección (compatibilidad) |
 
 ---
 
@@ -343,6 +383,19 @@ python -m serial.tools.list_ports
   servidor. Si aparece ese mensaje, revisar el traceback impreso y las
   dependencias: `pip install -r requirements.txt`.
 
+### Las anotaciones de visión van "atrasadas" respecto al video
+- Es el diseño (v2.6.0): la inferencia corre desacoplada y el stream dibuja
+  el último resultado publicado, así el video no pierde FPS. El desfase
+  máximo es un ciclo de inferencia (visible en el HUD). Si molesta, reducir
+  la latencia del modelo: `imgsz` 416/320, apagar la segmentación, o un
+  modelo optimizado (`docs/YOLO_FINETUNING.md`).
+
+### El panel AI muestra "Vmax HOVER" (modo stale)
+- La inferencia no está publicando resultados frescos (>1.5 s). Causas
+  típicas: modelo demasiado pesado para la CPU (usar yolov8n, bajar
+  `imgsz`), o la captura se detuvo. Ver `latency.vision_fps` en
+  `GET /api/vision/status`.
+
 ---
 
 ## 📁 Estructura de archivos
@@ -353,7 +406,9 @@ python -m serial.tools.list_ports
 │   ├── elrs_backend.py      ← Servidor principal (EJECUTAR ESTE)
 │   ├── session_manager.py   ← Módulo de sesiones (no ejecutar solo)
 │   ├── video_streamer.py    ← Video FPV: captura + WebRTC + grabación
-│   ├── yolo_processor.py    ← Inferencia YOLO (opcional)
+│   ├── vision_pipeline.py   ← Cascada de visión + LatencyGovernor
+│   ├── yolo_processor.py    ← Etapa de detección YOLO
+│   ├── segmentation_processor.py ← Etapa de segmentación (opcional)
 │   ├── video_calibrate.py   ← Calibración de imagen (standalone)
 │   └── video_config.json    ← Config de imagen generada por la calibración
 ├── frontend/                ← Interfaz web (servida por el backend)
@@ -365,9 +420,12 @@ python -m serial.tools.list_ports
 ├── docs/
 │   ├── ARCHITECTURE.md      ← Resumen arquitectónico y librerías (onboarding)
 │   ├── SETUP.md             ← Guía de instalación con conda (CPU/GPU)
+│   ├── VISION_PIPELINE.md   ← Pipeline de visión y política de latencia
+│   ├── YOLO_FINETUNING.md   ← Guía de fine-tuning (tamaño y latencia)
+│   ├── HARDWARE_VALIDATION.md ← Checklist de validación con hardware real
 │   ├── ROADMAP.md           ← Trabajo futuro (no mezclar con este README)
 │   └── AGENT_HANDOFF.md     ← Reglas de mantenimiento de la documentación
-├── models/                  ← Modelos YOLO .pt (se crea automático, fuera de git)
+├── models/                  ← Modelos YOLO .pt/.onnx (se crea automático, fuera de git)
 ├── logs/                    ← Sesiones guardadas (se crea automático, fuera de git)
 │   ├── session_*.json
 │   └── video/               ← Grabaciones MP4

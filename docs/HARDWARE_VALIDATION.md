@@ -87,21 +87,31 @@ son prerequisito unos de otros en el orden dado.
       `W`, y confirmar que `POST /api/video/config` / `GET /api/video/config`
       reflejan los mismos valores guardados en `video_config.json`.
 
-## 4. YOLO (Fase 2)
+## 4. Pipeline de visión (Fase 2 — v2.6.0)
 
-- [ ] `GET /api/yolo/status` y `GET /api/yolo/models` responden correctamente
-      con el modelo por defecto (o uno en `models/` si se agregó uno custom).
-- [ ] `POST /api/yolo/config` activa la inferencia sobre el stream real (no
-      solo sobre un video pregrabado) y las bounding boxes aparecen
-      embebidas en el frame que llega por WebRTC.
-- [ ] Medir el FPS de inferencia alcanzable en el laptop de desarrollo con
-      el stream en vivo — dato pendiente explícito en el roadmap.
-- [ ] Medir el impacto de YOLO activo sobre la latencia WebRTC (comparar
-      contra la medición de latencia del bloque 3 con YOLO apagado).
-- [ ] Con esos dos números, registrar una recomendación explícita:
-      ¿inferencia en tiempo real sobre el stream, o post-proceso sobre el
-      MP4 grabado? (decisión pendiente en el roadmap, esta prueba la
-      informa).
+- [ ] `GET /api/vision/status` y `GET /api/vision/models` responden
+      correctamente (detección y segmentación por separado; los `.pt` en
+      `models/` aparecen en la lista de su etapa según la convención `-seg`).
+- [ ] `POST /api/yolo/config` activa la detección sobre el stream real (no
+      solo sobre un video pregrabado): bounding boxes + HUD de latencia
+      aparecen embebidos en el frame que llega por WebRTC.
+- [ ] `POST /api/segmentation/config` con `focus_mode: "overlay"` dibuja
+      contornos amarillos; con `"mask"` y detección activa, verificar en
+      escenas con ruido analógico si los falsos positivos bajan respecto a
+      detección sola (razón de ser de la etapa — si no aporta, se apaga).
+- [ ] **El stream no pierde FPS con la visión activa** (diseño desacoplado
+      de v2.6.0): comparar los FPS del player (F2) con visión on/off. El
+      overlay puede ir atrasado ≤1 ciclo de inferencia; eso es esperado.
+- [ ] Medir con el stream en vivo (panel AI o `/api/vision/status`):
+      `latency.vision_fps` y `latency.pipeline_ms` para cada combinación
+      (det solo / seg overlay / seg mask + det) — datos pendientes en el
+      roadmap; las cifras actuales vienen de frames sintéticos.
+- [ ] Verificar el `LatencyGovernor` en vivo: Vmax visible en HUD/panel con
+      visión activa; forzar modo `stale` (p. ej. cargar yolov8m en CPU o
+      detener la captura) y confirmar que pasa a "HOVER".
+- [ ] Con esos números, registrar una recomendación explícita: ¿cascada
+      completa, detección sola, o post-proceso sobre el MP4 grabado?
+      (decisión pendiente en el roadmap, esta prueba la informa).
 
 ## 5. Señal RF / rango (si hay oportunidad de vuelo real)
 

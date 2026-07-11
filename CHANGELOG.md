@@ -1,6 +1,72 @@
 > Las fases pendientes (Fase 3 — inyección EdgeTX, Fase 4 — vuelo autónomo)
 > y el resto del trabajo futuro viven ahora en `docs/ROADMAP.md`.
 
+## [2.6.0] — 2026-07-11
+
+### Añadido — Pipeline de visión en cascada (segmentación + YOLO)
+
+- **`backend/vision_pipeline.py`**: orquestador de la cascada de visión.
+  - Inferencia **desacoplada del stream**: loop propio sobre el último frame
+    (ThreadPoolExecutor de 1 worker); el track WebRTC ya no espera a la red
+    neuronal — solo dibuja el último resultado publicado (`annotate()`,
+    primitivas cv2, <1 ms). El video mantiene sus FPS aunque la visión corra
+    a 2–5 FPS. Resultados con >2 s de edad no se dibujan.
+  - **`LatencyGovernor`**: traduce la latencia total cámara→decisión→drone
+    en una velocidad máxima recomendada para el futuro autopilot
+    (`v_max = safety_distance / t_total`); modos `off` / `warming_up` /
+    `active` / `stale` (hover). Encender más etapas de visión reduce
+    automáticamente la velocidad recomendada. Parámetros ajustables via
+    `POST /api/vision/governor`.
+- **`backend/segmentation_processor.py`**: etapa opcional de segmentación
+  previa a la detección (yolov8n-seg por defecto). `focus_mode="mask"`
+  suprime el fondo (máscara dilatada con margen) antes del detector YOLO;
+  `"overlay"` solo dibuja los contornos para evaluar la etapa. Se
+  enciende/apaga independiente del detector.
+- **Endpoints**: `GET /api/vision/status` (etapas + latencias por etapa +
+  FPS de visión + governor), `GET /api/vision/models` (detección y
+  segmentación por separado), `POST /api/segmentation/config`,
+  `POST /api/vision/governor`.
+- **Panel AI del frontend**: toggles independientes SEG / DETECT, selector
+  de modelo y focus_mode de segmentación, y stats en vivo de latencia del
+  pipeline y Vmax recomendada. HUD de latencia dibujado sobre el stream.
+- **`docs/VISION_PIPELINE.md`**: diseño del pipeline, tabla de combinaciones
+  de etapas con latencias medidas, presupuesto de latencia extremo a
+  extremo y política de integración del governor para `autopilot.py`.
+- **`docs/YOLO_FINETUNING.md`**: guía de fine-tuning para reducir tamaño y
+  latencia — dataset desde `logs/video/`, etiquetado, entrenamiento
+  (yolov8n@416, freeze, single_cls), export ONNX / OpenVINO INT8 / TensorRT
+  con tabla de speedups esperados, benchmark y despliegue en `models/`.
+
+### Cambiado
+
+- **`backend/yolo_processor.py`**: de procesador asíncrono autónomo a etapa
+  síncrona de la cascada (`infer()` devuelve detecciones; el threading vive
+  en `vision_pipeline.py`). `imgsz` configurable en runtime (640/416/320) y
+  soporte de modelos exportados (`.onnx`/`.engine`). `list_local_models()`
+  separa detección de segmentación (convención `-seg` en el nombre).
+- **`backend/video_streamer.py`**: `VideoStreamer` conecta `VisionPipeline`
+  al ciclo de vida de la captura (start/stop); `video.yolo` queda como
+  alias del detector para compatibilidad con `/api/yolo/*`. `status` expone
+  la clave nueva `vision` (y mantiene `yolo`).
+- **`POST /api/yolo/config`** acepta `imgsz`; `confidence` ahora se aplica
+  también al deshabilitar.
+- Versión del servidor a **2.6.0**.
+
+### Verificación
+
+- `py_compile` de los 7 módulos backend; import del backend con las 7 rutas
+  de visión registradas; `node --check` del JS inline del frontend.
+- Pipeline ejercitado de punta a punta con frames reales (bus.jpg 1280×720,
+  CPU): detección sola ~120–150 ms, cascada mask ~135–175 ms, overlay con
+  contornos + cajas + HUD verificado visualmente; governor probado en sus
+  4 modos (active → 6.8 m/s con defaults; stale → hover).
+- Endpoints ejercitados con `TestClient` (config de ambas etapas, governor,
+  validación de `focus_mode` inválido → 400, rutas `/api/yolo/*` compat).
+- Pendiente (sin cambios): validación en runtime con la EasyCap real
+  (ver `ROADMAP.md`).
+
+---
+
 ## [2.5.0] — 2026-07-10
 
 ### Cambiado — Reestructuración del repositorio

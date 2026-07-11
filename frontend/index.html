@@ -268,17 +268,19 @@
             <!-- YOLO badge (visible cuando YOLO está activo) -->
             <div class="yolo-live-badge" id="yoloBadge">● AI</div>
 
-            <!-- YOLO Panel (collapsible) -->
+            <!-- AI Vision Panel (collapsible): segmentación + detección YOLO -->
             <div class="yolo-panel" id="yoloPanel">
                 <div class="yolo-header">
-                    <span class="yolo-title">AI VISION — YOLO</span>
+                    <span class="yolo-title">AI VISION — SEG + YOLO</span>
                     <span class="yolo-stats" id="yoloStats">
                         <span id="yoloFPS">--</span> FPS &nbsp;|&nbsp;
-                        <span id="yoloCount">0</span> detections
+                        <span id="yoloCount">0</span> det &nbsp;|&nbsp;
+                        <span id="visionLat">--</span> ms &nbsp;|&nbsp;
+                        Vmax <span id="visionVmax">--</span> m/s
                     </span>
                 </div>
                 <div class="vs-row">
-                    <span class="vs-label">MODEL</span>
+                    <span class="vs-label">DETECT</span>
                     <select id="yoloModel" class="vc-select" style="flex:1;">
                         <option value="yolov8n.pt">yolov8n (fast)</option>
                         <option value="yolov8s.pt">yolov8s (balanced)</option>
@@ -291,9 +293,22 @@
                            oninput="vsUpdateValue(this,'yoloConfVal')">
                     <span class="vs-value" id="yoloConfVal">50</span>
                 </div>
+                <div class="vs-row">
+                    <span class="vs-label">SEGMENT</span>
+                    <select id="segModel" class="vc-select" style="flex:1;">
+                        <option value="yolov8n-seg.pt">yolov8n-seg (fast)</option>
+                        <option value="yolov8s-seg.pt">yolov8s-seg (accurate)</option>
+                    </select>
+                    <select id="segFocus" class="vc-select" title="mask: suprime el fondo antes del detector | overlay: solo visual">
+                        <option value="mask">mask</option>
+                        <option value="overlay">overlay</option>
+                    </select>
+                </div>
                 <div class="vs-row" style="justify-content:flex-end;gap:8px;padding-top:4px;">
+                    <button class="vc-btn vc-btn-primary" id="btnSegToggle"
+                            onclick="segToggle()">▶ Enable SEG</button>
                     <button class="vc-btn vc-btn-primary" id="btnYoloToggle"
-                            onclick="yoloToggle()">▶ Enable AI</button>
+                            onclick="yoloToggle()">▶ Enable DETECT</button>
                 </div>
             </div>
 
@@ -422,92 +437,102 @@
         }
 
         // ── Video Settings ──────────────────────────
-        // ── YOLO panel ───────────────────────────────
-        let yoloEnabled   = false;
-        let yoloStatTimer = null;
+        // ── AI Vision panel (segmentación + detección) ──
+        let yoloEnabled     = false;
+        let segEnabled      = false;
+        let visionStatTimer = null;
 
         window.toggleYoloPanel = function () {
             const panel = document.getElementById('yoloPanel');
             const isOpen = panel.classList.toggle('open');
-            // Cerrar settings si se abre YOLO
+            // Cerrar settings si se abre el panel AI
             if (isOpen) document.getElementById('videoSettingsPanel').classList.remove('open');
-            if (isOpen) loadYoloModels();
+            if (isOpen) loadVisionModels();
         };
 
-        async function loadYoloModels() {
+        function fillModelSelect(selId, models, preferred) {
+            const all = [...new Set([...models.defaults, ...models.custom])];
+            document.getElementById(selId).innerHTML = all.map(m =>
+                `<option value="${m}"${m === preferred ? ' selected' : ''}>${m}</option>`
+            ).join('');
+        }
+
+        async function loadVisionModels() {
             try {
-                const r = await fetch('/api/yolo/models');
+                const r = await fetch('/api/vision/models');
                 if (!r.ok) return;
                 const data = await r.json();
-                const sel  = document.getElementById('yoloModel');
-                const all  = [...new Set([...data.defaults, ...data.custom])];
-                sel.innerHTML = all.map(m =>
-                    `<option value="${m}"${m === 'yolov8n.pt' ? ' selected' : ''}>${m}</option>`
-                ).join('');
-                if (data.custom.length > 0) {
-                    const grp = document.createElement('optgroup');
-                    grp.label = 'Custom';
-                    data.custom.forEach(m => {
-                        const o = document.createElement('option');
-                        o.value = m; o.textContent = m;
-                        grp.appendChild(o);
-                    });
-                }
+                fillModelSelect('yoloModel', data.detection,    'yolov8n.pt');
+                fillModelSelect('segModel',  data.segmentation, 'yolov8n-seg.pt');
             } catch (_) {}
+        }
+
+        function updateVisionUI() {
+            const anyOn = yoloEnabled || segEnabled;
+            document.getElementById('yoloBadge').classList.toggle('visible', anyOn);
+            if (anyOn && !visionStatTimer) {
+                visionStatTimer = setInterval(pollVisionStats, 1500);
+            } else if (!anyOn && visionStatTimer) {
+                clearInterval(visionStatTimer); visionStatTimer = null;
+            }
+        }
+
+        async function toggleStage(btn, url, body, enabling, labelOn, labelOff) {
+            btn.textContent = '⏳ Loading...';
+            btn.disabled    = true;
+            let ok = false;
+            try {
+                const r    = await fetch(url, {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(body),
+                });
+                const data = await r.json();
+                ok = r.ok && data.enabled === enabling;
+                if (!ok) console.error('[Vision]', data.error || 'Error');
+            } catch (e) {
+                console.error('[Vision]', e);
+            }
+            const on = enabling ? ok : !ok;
+            btn.textContent = on ? labelOn : labelOff;
+            btn.classList.toggle('active', on);
+            btn.disabled = false;
+            return ok;
         }
 
         window.yoloToggle = async function () {
             const btn   = document.getElementById('btnYoloToggle');
             const model = document.getElementById('yoloModel').value;
             const conf  = parseInt(document.getElementById('yoloConf').value) / 100;
-
-            if (yoloEnabled) {
-                // Deshabilitar
-                await fetch('/api/yolo/config', {
-                    method: 'POST', headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ enabled: false, model, confidence: conf }),
-                });
-                yoloEnabled = false;
-                btn.textContent = '▶ Enable AI';
-                btn.classList.remove('active');
-                document.getElementById('yoloBadge').classList.remove('visible');
-                clearInterval(yoloStatTimer); yoloStatTimer = null;
-            } else {
-                // Habilitar — puede tardar (descarga modelo)
-                btn.textContent = '⏳ Loading...';
-                btn.disabled    = true;
-                try {
-                    const r = await fetch('/api/yolo/config', {
-                        method: 'POST', headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ enabled: true, model, confidence: conf }),
-                    });
-                    const data = await r.json();
-                    if (r.ok && data.enabled) {
-                        yoloEnabled = true;
-                        btn.textContent = '■ Disable AI';
-                        btn.classList.add('active');
-                        document.getElementById('yoloBadge').classList.add('visible');
-                        yoloStatTimer = setInterval(pollYoloStats, 1500);
-                    } else {
-                        btn.textContent = '▶ Enable AI';
-                        console.error('[YOLO]', data.error || 'Error');
-                    }
-                } catch (e) {
-                    btn.textContent = '▶ Enable AI';
-                    console.error('[YOLO]', e);
-                }
-                btn.disabled = false;
-            }
+            const ok = await toggleStage(btn, '/api/yolo/config',
+                { enabled: !yoloEnabled, model, confidence: conf },
+                !yoloEnabled, '■ Disable DETECT', '▶ Enable DETECT');
+            if (ok) yoloEnabled = !yoloEnabled;
+            updateVisionUI();
         };
 
-        async function pollYoloStats() {
+        window.segToggle = async function () {
+            const btn   = document.getElementById('btnSegToggle');
+            const model = document.getElementById('segModel').value;
+            const focus = document.getElementById('segFocus').value;
+            const ok = await toggleStage(btn, '/api/segmentation/config',
+                { enabled: !segEnabled, model, focus_mode: focus },
+                !segEnabled, '■ Disable SEG', '▶ Enable SEG');
+            if (ok) segEnabled = !segEnabled;
+            updateVisionUI();
+        };
+
+        async function pollVisionStats() {
             try {
-                const r    = await fetch('/api/yolo/status');
+                const r    = await fetch('/api/vision/status');
                 const data = await r.json();
-                if (data.model_loaded) {
-                    document.getElementById('yoloFPS').textContent   = data.inf_fps ?? '--';
-                    document.getElementById('yoloCount').textContent = data.detection_count ?? 0;
-                }
+                if (!data.active) return;
+                document.getElementById('yoloFPS').textContent   = data.latency?.vision_fps ?? '--';
+                document.getElementById('yoloCount').textContent = data.detection?.detection_count ?? 0;
+                document.getElementById('visionLat').textContent = Math.round(data.latency?.pipeline_ms ?? 0);
+                const gov = data.governor || {};
+                document.getElementById('visionVmax').textContent =
+                    gov.mode === 'active' ? gov.max_speed_ms.toFixed(1) :
+                    gov.mode === 'stale'  ? 'HOVER' : '--';
             } catch (_) {}
         }
 

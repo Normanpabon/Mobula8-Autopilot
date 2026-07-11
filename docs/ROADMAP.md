@@ -5,8 +5,9 @@ de `README.md`. El README describe el sistema **tal como funciona hoy**; este
 archivo describe **hacia dónde va**. Ver `AGENT_HANDOFF.md` para las reglas
 de cómo mantener ambos documentos.
 
-Última actualización: 2026-07-10 (tras v2.5.0 — reestructuración en
-`backend/` + `frontend/` + `docs/`, ver `ARCHITECTURE.md`).
+Última actualización: 2026-07-11 (tras v2.6.0 — pipeline de visión en
+cascada segmentación + YOLO desacoplado del stream, LatencyGovernor y guía
+de fine-tuning; ver `VISION_PIPELINE.md` y `YOLO_FINETUNING.md`).
 
 ---
 
@@ -27,10 +28,19 @@ de cómo mantener ambos documentos.
       `anti_magenta` (`wb_r: 0.75, wb_g: 1.10, wb_b: 0.75`) si el valor real
       difiere. Usar `python backend/video_calibrate.py` (tecla `I` aplica el
       preset, `R/E/U` ajustan por canal, `W` guarda).
-- [ ] Validar el pipeline YOLO (v2.4.0) sobre el stream real: FPS de
-      inferencia alcanzable en el laptop, impacto en la latencia WebRTC
-      (~150–250 ms de aiortc + ~50–100 ms de la EasyCap), y si conviene
-      inferencia en tiempo real o post-proceso sobre la grabación MP4.
+- [ ] Validar el pipeline de visión (v2.6.0) sobre el stream real de la
+      EasyCap: FPS de visión alcanzables en el laptop, si el modo `mask` de
+      la segmentación reduce falsos positivos en video analógico con ruido,
+      y confirmar que el stream mantiene sus FPS con la inferencia
+      desacoplada (las cifras actuales vienen de frames sintéticos; ver
+      `VISION_PIPELINE.md` §6).
+- [ ] Primer fine-tuning con dataset propio siguiendo `YOLO_FINETUNING.md`:
+      grabar sesiones variadas, etiquetar, entrenar yolov8n@416 y comparar
+      latencia/precisión contra el COCO genérico. Evaluar entonces si la
+      etapa de segmentación sigue aportando o se retira.
+- [ ] Export ONNX / OpenVINO INT8 del modelo fine-tuneado y medición del
+      speedup real en este laptop (tabla de expectativas en
+      `YOLO_FINETUNING.md` §6).
 - [ ] Exportación CSV de sesiones (para análisis en Excel/Python) —
       mencionado como pendiente desde v1.0.0, nunca implementado.
 - [ ] Comparación de sesiones: superponer métricas de dos o más vuelos en
@@ -60,7 +70,17 @@ de cómo mantener ambos documentos.
 
 - [ ] `autopilot.py`: motor de control autónomo con máquina de estados
       (IDLE → ARM → TAKEOFF → MISSION → LAND → DISARM)
-- [ ] Loop visión → decisión → comando usando telemetría + detecciones YOLO
+- [ ] Loop visión → decisión → comando usando telemetría + detecciones YOLO,
+      integrando el `LatencyGovernor` de v2.6.0: saturar la velocidad
+      comandada con `governor.max_speed_ms`, hover en modo `stale`, y
+      degradar visión (bajar `imgsz` / apagar segmentación) antes que
+      perder frescura — reglas completas en `VISION_PIPELINE.md` §4.
+- [ ] Medir `reaction_time_ms` real (decisión + inyección CRSF + uplink +
+      respuesta del drone) cuando exista la Fase 3, y recalibrar el governor
+      (hoy usa 250 ms estimados).
+- [ ] Evaluar compensación predictiva de latencia (Kalman con actitud CRSF
+      para extrapolar detecciones) como alternativa a limitar velocidad
+      (`VISION_PIPELINE.md` §4, alternativas consideradas).
 - [ ] Controlador PID sobre pitch/roll para hover estabilizado
 - [ ] Modo Follow target: centra el objeto detectado ajustando yaw/pitch
 - [ ] Modo Return to safe: aterrizaje automático por batería baja o pérdida

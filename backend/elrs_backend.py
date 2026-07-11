@@ -1,5 +1,5 @@
 """
-ELRS Backend WebSocket Server v2.5.0
+ELRS Backend WebSocket Server v2.6.0
 """
 import asyncio, json, argparse
 from contextlib import asynccontextmanager
@@ -101,13 +101,13 @@ async def lifespan(app: FastAPI):
     parser.add_argument("--baud", type=int, default=115200)
     args, _ = parser.parse_known_args()
     asyncio.create_task(serial_reader_task(args.port, args.baud))
-    print("[SERVER] ELRS Telemetry Server v2.5.0 listo")
+    print("[SERVER] ELRS Telemetry Server v2.6.0 listo")
     yield
     # Shutdown
     if session and session.current_frame_count > 0:
         print("[SERVER] Guardando sesión..."); session.save()
 
-app = FastAPI(title="ELRS Telemetry Server", version="2.5.0", lifespan=lifespan)
+app = FastAPI(title="ELRS Telemetry Server", version="2.6.0", lifespan=lifespan)
 manager = ConnectionManager()
 session: Optional[SessionManager] = None
 telemetry_history = deque(maxlen=500)
@@ -162,6 +162,18 @@ class YOLOConfigRequest(BaseModel):
     enabled:    bool  = False
     model:      str   = "yolov8n.pt"
     confidence: float = 0.5
+    imgsz:      int   = 640     # 416/320 reducen latencia (docs/YOLO_FINETUNING.md)
+
+class SegmentationConfigRequest(BaseModel):
+    enabled:    bool  = False
+    model:      str   = "yolov8n-seg.pt"
+    confidence: float = 0.35
+    focus_mode: str   = "mask"  # "mask": suprime fondo antes del detector | "overlay": solo visual
+    imgsz:      int   = 416
+
+class GovernorConfigRequest(BaseModel):
+    safety_distance_m: float = 3.0
+    reaction_time_ms:  float = 250.0
 
 
 # ──────────────────────────────────────────────────────────────
@@ -355,8 +367,60 @@ async def stop_recording():
     return JSONResponse({"recording": False, "saved": path})
 
 # ──────────────────────────────────────────────────────────────
-# YOLO routes
+# Vision routes (pipeline: segmentación + detección YOLO + governor)
 # ──────────────────────────────────────────────────────────────
+@app.get("/api/vision/status")
+async def get_vision_status():
+    if not VIDEO_AVAILABLE or not video or not video.vision:
+        return JSONResponse({"available": False})
+    return JSONResponse(video.vision.status)
+
+@app.get("/api/vision/models")
+async def list_vision_models():
+    det_defaults = ["yolov8n.pt", "yolov8s.pt", "yolov8m.pt"]
+    seg_defaults = ["yolov8n-seg.pt", "yolov8s-seg.pt"]
+    if not VIDEO_AVAILABLE or not video or not video.vision:
+        return JSONResponse({"detection":    {"custom": [], "defaults": det_defaults},
+                             "segmentation": {"custom": [], "defaults": seg_defaults}})
+    from yolo_processor import YOLOProcessor
+    from segmentation_processor import SegmentationProcessor
+    return JSONResponse({
+        "detection":    {"custom": YOLOProcessor.list_local_models(),
+                         "defaults": det_defaults},
+        "segmentation": {"custom": SegmentationProcessor.list_local_models(),
+                         "defaults": seg_defaults},
+    })
+
+@app.post("/api/segmentation/config")
+async def update_segmentation_config(req: SegmentationConfigRequest):
+    if not VIDEO_AVAILABLE or not video or not video.vision:
+        return JSONResponse({"error": "Visión no disponible"}, status_code=503)
+    seg = video.vision.segmenter
+    if not seg.is_available():
+        return JSONResponse({"error": "ultralytics no instalado — pip install ultralytics"}, status_code=503)
+    if req.focus_mode not in ("mask", "overlay"):
+        return JSONResponse({"error": "focus_mode debe ser 'mask' u 'overlay'"}, status_code=400)
+    seg.confidence = req.confidence
+    seg.focus_mode = req.focus_mode
+    seg.imgsz      = req.imgsz
+    if req.enabled and (req.model != seg._model_path or seg._model is None):
+        loop = asyncio.get_event_loop()
+        ok   = await loop.run_in_executor(None, seg.load_model, req.model)
+        if not ok:
+            return JSONResponse({"error": f"No se pudo cargar {req.model}"}, status_code=500)
+    seg.enabled = req.enabled
+    return JSONResponse({"updated": True, **seg.status})
+
+@app.post("/api/vision/governor")
+async def update_vision_governor(req: GovernorConfigRequest):
+    if not VIDEO_AVAILABLE or not video or not video.vision:
+        return JSONResponse({"error": "Visión no disponible"}, status_code=503)
+    gov = video.vision.governor
+    gov.safety_distance_m = req.safety_distance_m
+    gov.reaction_time_ms  = req.reaction_time_ms
+    return JSONResponse({"updated": True, **video.vision.status["governor"]})
+
+# ── YOLO (detector) — rutas históricas, siguen siendo el contrato del panel AI
 @app.get("/api/yolo/status")
 async def get_yolo_status():
     if not VIDEO_AVAILABLE or not video or not video.yolo:
@@ -379,14 +443,15 @@ async def update_yolo_config(req: YOLOConfigRequest):
     yolo = video.yolo
     if not yolo.is_available():
         return JSONResponse({"error": "ultralytics no instalado — pip install ultralytics"}, status_code=503)
+    yolo.confidence = req.confidence
+    yolo.imgsz      = req.imgsz
     # Cargar modelo si cambió o no hay ninguno cargado
     if req.enabled and (req.model != yolo._model_path or yolo._model is None):
         loop = asyncio.get_event_loop()
         ok   = await loop.run_in_executor(None, yolo.load_model, req.model)
         if not ok:
             return JSONResponse({"error": f"No se pudo cargar {req.model}"}, status_code=500)
-    yolo.enabled    = req.enabled
-    yolo.confidence = req.confidence
+    yolo.enabled = req.enabled
     return JSONResponse({"updated": True, **yolo.status})
 
 
@@ -437,15 +502,15 @@ if frontend_path.exists():
         return FileResponse(index) if index.exists() else JSONResponse({"error": "Not found"}, 404)
 else:
     @app.get("/")
-    async def root(): return JSONResponse({"message": "ELRS v2.5.0", "error": "frontend/ not found"})
+    async def root(): return JSONResponse({"message": "ELRS v2.6.0", "error": "frontend/ not found"})
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="ELRS Telemetry Server v2.5.0")
+    parser = argparse.ArgumentParser(description="ELRS Telemetry Server v2.6.0")
     parser.add_argument("--port", default="COM6")
     parser.add_argument("--baud", type=int, default=115200)
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--web-port", type=int, default=8080)
     args = parser.parse_args()
-    print(f"ELRS Telemetry Server v2.5.0 | {args.port}@{args.baud} | http://localhost:{args.web_port}")
+    print(f"ELRS Telemetry Server v2.6.0 | {args.port}@{args.baud} | http://localhost:{args.web_port}")
     uvicorn.run(app, host=args.host, port=args.web_port, log_level="warning")

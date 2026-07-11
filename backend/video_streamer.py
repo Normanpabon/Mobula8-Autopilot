@@ -559,8 +559,10 @@ class WebRTCManager:
 
 class VideoStreamer:
     """
-    Fachada que agrupa captura, YOLO, WebRTC y grabación.
-    Pipeline de frames: captura → correcciones → [YOLO] → WebRTC / grabación
+    Fachada que agrupa captura, visión (segmentación + YOLO), WebRTC y grabación.
+    Pipeline de frames: captura → correcciones → overlay de visión → WebRTC / grabación.
+    La inferencia corre desacoplada en VisionPipeline (loop propio); el stream
+    solo dibuja el último resultado publicado, sin esperar a la inferencia.
     """
 
     def __init__(self):
@@ -568,26 +570,32 @@ class VideoStreamer:
         self.recorder = VideoRecorder()
         self.webrtc:  Optional[WebRTCManager] = None
 
-        # YOLO (opcional — no falla si ultralytics no está instalado)
+        # Visión (opcional — no falla si ultralytics no está instalado;
+        # los procesadores reportan available=False y los endpoints responden 503)
         try:
-            from yolo_processor import YOLOProcessor
-            self.yolo: Optional[YOLOProcessor] = YOLOProcessor()
-            log.info("[VideoStreamer] YOLOProcessor disponible")
-        except ImportError:
-            self.yolo = None
-            log.info("[VideoStreamer] yolo_processor no disponible (ultralytics no instalado)")
+            from vision_pipeline import VisionPipeline
+            self.vision: Optional[VisionPipeline] = VisionPipeline()
+            log.info("[VideoStreamer] VisionPipeline disponible")
+        except Exception as e:
+            self.vision = None
+            log.warning(f"[VideoStreamer] vision_pipeline no disponible: {e}")
+
+    @property
+    def yolo(self):
+        """Alias de compatibilidad (endpoints /api/yolo/*): el detector del pipeline."""
+        return self.vision.detector if self.vision else None
 
     async def _get_display_frame(self):
-        """Frame getter para WebRTC: captura → [YOLO] → frame BGR."""
+        """Frame getter para WebRTC: captura → overlay de visión (no bloqueante)."""
         frame = await self.capture.get_frame()
-        if frame is not None and self.yolo and self.yolo.enabled:
-            frame = await self.yolo.process_async(frame)
+        if frame is not None and self.vision:
+            frame = self.vision.annotate(frame)
         return frame
 
     async def start_capture(self, device_id: int = 0,
                             width: int = 1280, height: int = 720,
                             fps: int = 30) -> bool:
-        """Inicia la captura y habilita WebRTC."""
+        """Inicia la captura, el loop de visión y habilita WebRTC."""
         ok = await self.capture.start(device_id, width, height, fps)
         if ok:
             self.webrtc = WebRTCManager(
@@ -596,13 +604,17 @@ class VideoStreamer:
                 self.capture.height,
                 self.capture.fps,
             )
+            if self.vision:
+                self.vision.start(self.capture.get_frame)
             log.info("VideoStreamer listo")
         return ok
 
     async def stop_capture(self):
-        """Detiene todo: captura, WebRTC y grabación."""
+        """Detiene todo: visión, captura, WebRTC y grabación."""
         if self.recorder.is_recording:
             self.recorder.stop()
+        if self.vision:
+            await self.vision.stop()
         if self.webrtc:
             await self.webrtc.close_all()
             self.webrtc = None
@@ -646,6 +658,7 @@ class VideoStreamer:
             "capture":  self.capture.status,
             "recorder": self.recorder.status,
             "webrtc":   self.webrtc.status if self.webrtc else {"active_peers": 0},
+            "vision":   self.vision.status if self.vision else {"available": False},
             "yolo":     self.yolo.status if self.yolo else {"available": False},
         }
 

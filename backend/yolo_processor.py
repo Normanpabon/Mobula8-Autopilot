@@ -1,20 +1,22 @@
 """
-YOLOProcessor — Inferencia de visión en tiempo real sobre frames FPV
-=====================================================================
-Integra con video_streamer.py como paso opcional en el pipeline de frames.
+YOLOProcessor — Detección de objetos sobre frames FPV
+=====================================================
+Wrapper síncrono del modelo de detección YOLO. Desde v2.6.0 el threading y
+la orquestación viven en `vision_pipeline.py` (un solo worker para toda la
+cascada segmentación → detección); este módulo solo carga el modelo y corre
+inferencia bloqueante.
 
 Dependencias:
     pip install ultralytics   (incluye torch CPU por defecto)
     pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118  (GPU CUDA 11.8)
 
 Modelos:
-    - Colocar archivos .pt en la carpeta models/ para uso offline.
+    - Colocar archivos .pt / .onnx / .engine en la carpeta models/ para uso offline.
     - Si el modelo no está localmente, ultralytics lo descarga automáticamente.
     - Defaults disponibles: yolov8n.pt (~6MB), yolov8s.pt (~22MB), yolov8m.pt (~50MB)
+    - Modelos fine-tuneados propios: ver docs/YOLO_FINETUNING.md
 """
 
-import asyncio
-import concurrent.futures
 import time
 import logging
 from pathlib import Path
@@ -36,18 +38,17 @@ except ImportError:
 
 class YOLOProcessor:
     """
-    Procesa frames BGR con un modelo YOLO y devuelve frames anotados.
-    La inferencia corre en un ThreadPoolExecutor de 1 worker para no
-    bloquear el event loop de asyncio.
+    Detección de objetos sobre frames BGR. `infer()` es bloqueante: llamarlo
+    siempre desde el worker de VisionPipeline, nunca desde el event loop.
     """
 
     def __init__(self):
         self._model           = None
         self._model_path:  Optional[str] = None
-        self._executor        = concurrent.futures.ThreadPoolExecutor(max_workers=1,
-                                                                       thread_name_prefix="yolo")
         self.enabled          = False
         self.confidence       = 0.5
+        self.imgsz            = 640   # 640 default; 416/320 reducen latencia (ver YOLO_FINETUNING.md)
+        self._inf_ms          = 0.0
         self._inf_fps         = 0.0
         self._last_detections: list = []
 
@@ -55,6 +56,10 @@ class YOLOProcessor:
 
     def is_available(self) -> bool:
         return ULTRALYTICS_AVAILABLE
+
+    @property
+    def is_loaded(self) -> bool:
+        return self._model is not None
 
     def load_model(self, model_name: str = "yolov8n.pt") -> bool:
         """
@@ -72,46 +77,33 @@ class YOLOProcessor:
         try:
             log.info(f"[YOLO] Cargando modelo: {path}")
             model = YOLO(path)
-            # Warm-up
-            dummy = np.zeros((640, 640, 3), dtype=np.uint8)
-            model(dummy, verbose=False)
+            # Warm-up al imgsz configurado
+            dummy = np.zeros((self.imgsz, self.imgsz, 3), dtype=np.uint8)
+            model(dummy, imgsz=self.imgsz, verbose=False)
             self._model      = model
             self._model_path = model_name
-            log.info(f"[YOLO] Modelo {model_name} listo")
+            log.info(f"[YOLO] Modelo {model_name} listo (imgsz={self.imgsz})")
             return True
         except Exception as e:
             log.error(f"[YOLO] Error cargando {model_name}: {e}")
             self._model = None
             return False
 
-    async def process_async(self, frame_bgr: np.ndarray) -> np.ndarray:
+    def infer(self, frame_bgr: np.ndarray) -> list:
         """
-        Corre inferencia en el executor y devuelve el frame anotado (BGR).
-        Si YOLO no está listo, devuelve el frame original sin modificar.
+        Inferencia síncrona. Devuelve la lista de detecciones:
+        [{"class": str, "confidence": float, "bbox": [x1, y1, x2, y2]}, ...]
+        Las coordenadas están en píxeles del frame original.
         """
-        if not self._model or not self.enabled:
-            return frame_bgr
-        loop = asyncio.get_event_loop()
-        try:
-            annotated, _ = await loop.run_in_executor(
-                self._executor, self._infer, frame_bgr
-            )
-            return annotated
-        except Exception as e:
-            log.error(f"[YOLO] Error de inferencia: {e}")
-            return frame_bgr
+        if self._model is None:
+            return []
 
-    # ── Internals ────────────────────────────────────────────────────────────
-
-    def _infer(self, frame_bgr: np.ndarray) -> tuple:
-        """Inferencia síncrona + dibujo de bounding boxes."""
         t0 = time.perf_counter()
-        results = self._model(frame_bgr, conf=self.confidence, verbose=False)
+        results = self._model(frame_bgr, conf=self.confidence,
+                              imgsz=self.imgsz, verbose=False)
         dt = time.perf_counter() - t0
-        self._inf_fps = round(1.0 / dt, 1) if dt > 0 else 0
-
-        # results[0].plot() devuelve BGR con cajas y labels dibujados
-        annotated = results[0].plot()
+        self._inf_ms  = round(dt * 1000, 1)
+        self._inf_fps = round(1.0 / dt, 1) if dt > 0 else 0.0
 
         detections = []
         for box in results[0].boxes:
@@ -121,7 +113,7 @@ class YOLOProcessor:
                 "bbox":       [round(x, 1) for x in box.xyxy[0].tolist()],
             })
         self._last_detections = detections
-        return annotated, detections
+        return detections
 
     @property
     def status(self) -> dict:
@@ -131,12 +123,21 @@ class YOLOProcessor:
             "model_path":      self._model_path,
             "enabled":         self.enabled,
             "confidence":      self.confidence,
+            "imgsz":           self.imgsz,
+            "inf_ms":          self._inf_ms,
             "inf_fps":         self._inf_fps,
             "detection_count": len(self._last_detections),
             "detections":      self._last_detections,
         }
 
     @staticmethod
-    def list_local_models() -> list[str]:
-        """Lista archivos .pt en la carpeta models/."""
-        return sorted(f.name for f in MODELS_DIR.glob("*.pt"))
+    def list_local_models() -> list:
+        """
+        Modelos de detección en models/ (.pt/.onnx/.engine).
+        Excluye los de segmentación (convención: contienen "-seg").
+        """
+        exts = ("*.pt", "*.onnx", "*.engine")
+        names = []
+        for ext in exts:
+            names.extend(f.name for f in MODELS_DIR.glob(ext))
+        return sorted(n for n in set(names) if "-seg" not in n)
