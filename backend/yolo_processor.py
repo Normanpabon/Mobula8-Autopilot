@@ -23,7 +23,7 @@ import numpy as np
 
 log = logging.getLogger("yolo_processor")
 
-MODELS_DIR = Path(__file__).parent / "models"
+MODELS_DIR = Path(__file__).resolve().parent.parent / "models"
 MODELS_DIR.mkdir(exist_ok=True)
 
 try:

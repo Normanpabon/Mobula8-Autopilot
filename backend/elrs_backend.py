@@ -1,5 +1,5 @@
 """
-ELRS Backend WebSocket Server v2.4.1
+ELRS Backend WebSocket Server v2.5.0
 """
 import asyncio, json, argparse
 from contextlib import asynccontextmanager
@@ -101,13 +101,13 @@ async def lifespan(app: FastAPI):
     parser.add_argument("--baud", type=int, default=115200)
     args, _ = parser.parse_known_args()
     asyncio.create_task(serial_reader_task(args.port, args.baud))
-    print("[SERVER] ELRS Telemetry Server v2.4.1 listo")
+    print("[SERVER] ELRS Telemetry Server v2.5.0 listo")
     yield
     # Shutdown
     if session and session.current_frame_count > 0:
         print("[SERVER] Guardando sesión..."); session.save()
 
-app = FastAPI(title="ELRS Telemetry Server", version="2.4.1", lifespan=lifespan)
+app = FastAPI(title="ELRS Telemetry Server", version="2.5.0", lifespan=lifespan)
 manager = ConnectionManager()
 session: Optional[SessionManager] = None
 telemetry_history = deque(maxlen=500)
@@ -411,7 +411,7 @@ async def webrtc_offer(request: FRequest):
 # ──────────────────────────────────────────────────────────────
 # Frontend serving — el catch-all DEBE ser el último GET registrado
 # ──────────────────────────────────────────────────────────────
-frontend_path = Path(__file__).parent / "frontend-vanilla"
+frontend_path = Path(__file__).resolve().parent.parent / "frontend"
 
 if frontend_path.exists():
     @app.get("/css/{file_path:path}")
@@ -437,15 +437,15 @@ if frontend_path.exists():
         return FileResponse(index) if index.exists() else JSONResponse({"error": "Not found"}, 404)
 else:
     @app.get("/")
-    async def root(): return JSONResponse({"message": "ELRS v2.4.1", "error": "frontend-vanilla/ not found"})
+    async def root(): return JSONResponse({"message": "ELRS v2.5.0", "error": "frontend/ not found"})
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="ELRS Telemetry Server v2.4.1")
+    parser = argparse.ArgumentParser(description="ELRS Telemetry Server v2.5.0")
     parser.add_argument("--port", default="COM6")
     parser.add_argument("--baud", type=int, default=115200)
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--web-port", type=int, default=8080)
     args = parser.parse_args()
-    print(f"ELRS Telemetry Server v2.4.1 | {args.port}@{args.baud} | http://localhost:{args.web_port}")
+    print(f"ELRS Telemetry Server v2.5.0 | {args.port}@{args.baud} | http://localhost:{args.web_port}")
     uvicorn.run(app, host=args.host, port=args.web_port, log_level="warning")

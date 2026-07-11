@@ -1,5 +1,42 @@
 > Las fases pendientes (Fase 3 — inyección EdgeTX, Fase 4 — vuelo autónomo)
-> y el resto del trabajo futuro viven ahora en `ROADMAP.md`.
+> y el resto del trabajo futuro viven ahora en `docs/ROADMAP.md`.
+
+## [2.5.0] — 2026-07-10
+
+### Cambiado — Reestructuración del repositorio
+
+- **Separación por responsabilidades en carpetas** (todos los movimientos
+  con `git mv`, el historial se preserva):
+  - `backend/` — todo el código Python (`elrs_backend.py`,
+    `session_manager.py`, `video_streamer.py`, `yolo_processor.py`,
+    `video_calibrate.py`) más `video_config.json`.
+  - `frontend/` — la UI web (renombrada desde `frontend-vanilla/`; los
+    imports internos son relativos, no cambió nada dentro).
+  - `docs/` — `SETUP.md`, `ROADMAP.md`, `AGENT_HANDOFF.md` y el nuevo
+    `ARCHITECTURE.md`. `README.md` y `CHANGELOG.md` quedan en la raíz.
+- **Nuevo comando de arranque**: `python backend/elrs_backend.py`
+  (antes `python elrs_backend.py`).
+- Rutas internas ajustadas: los módulos de `backend/` resuelven la raíz del
+  repo con `Path(__file__).resolve().parent.parent` para `logs/`, `models/`
+  y `frontend/`; `video_config.json` se queda junto al código en `backend/`.
+
+### Añadido
+
+- **`docs/ARCHITECTURE.md`**: resumen arquitectónico para onboarding —
+  diagrama de flujo de datos, responsabilidad de cada módulo (backend y
+  frontend), tabla de librerías con su propósito, protocolos (CRSF/WS/
+  WebRTC/REST), presupuesto de latencia y decisiones de diseño.
+- **`.gitignore`**: `__pycache__/` eliminado del tracking de git (los `.pyc`
+  se "modificaban" en cada ejecución); `logs/` y `models/` también ignorados.
+
+### Verificación
+
+- `py_compile` de los cinco módulos, `import` del backend desde la nueva
+  estructura: versión 2.5.0, `frontend/` resuelto, `logs/` y `models/`
+  apuntando a la raíz, 12 rutas de video/YOLO/`offer` registradas.
+- Pendiente (sin cambios): validación en runtime con hardware real.
+
+---
 
 ## [2.4.1] — 2026-07-10
 

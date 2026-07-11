@@ -31,7 +31,8 @@ from av import VideoFrame
 
 log = logging.getLogger("video_streamer")
 
-LOGS_DIR    = Path(__file__).parent / "logs"
+# logs/ vive en la raíz del repo; video_config.json junto a este módulo (backend/)
+LOGS_DIR    = Path(__file__).resolve().parent.parent / "logs"
 VIDEO_DIR   = LOGS_DIR / "video"
 CONFIG_FILE = Path(__file__).parent / "video_config.json"
 VIDEO_DIR.mkdir(parents=True, exist_ok=True)

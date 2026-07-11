@@ -3,9 +3,15 @@
 Sistema de telemetría en tiempo real, video FPV por WebRTC y visión por
 computadora (YOLO) para Mobula8 con RadioMaster TX12 y protocolo ELRS.
 
-Versión actual: **2.4.1** — ver `CHANGELOG.md`. El trabajo futuro vive en
-`ROADMAP.md`; las reglas de mantenimiento de estos documentos, en
-`AGENT_HANDOFF.md`.
+Versión actual: **2.5.0** — ver `CHANGELOG.md`.
+
+| Documento | Contenido |
+|-----------|-----------|
+| `docs/ARCHITECTURE.md` | Resumen arquitectónico: módulos, librerías y su propósito, flujo de datos — **empezar aquí si eres nuevo en el proyecto** |
+| `docs/SETUP.md` | Instalación del entorno (conda, CPU/GPU) |
+| `docs/ROADMAP.md` | Trabajo futuro y fases pendientes |
+| `docs/AGENT_HANDOFF.md` | Reglas de mantenimiento de la documentación |
+| `CHANGELOG.md` | Historial de cambios |
 
 ---
 
@@ -35,20 +41,23 @@ accesible desde cualquier dispositivo en la red local.
 - **Protocolo**: CRSF sobre USB Serial (EdgeTX Telem Mirror, sync byte `0xEA`)
 - **Almacenamiento**: JSON plano en disco (`logs/`), video MP4 en `logs/video/`
 
+El detalle de cada librería y su propósito está en `docs/ARCHITECTURE.md`.
+
 ---
 
 ## 🏗️ Arquitectura
 
 ```
-elrs_backend.py          ← Servidor principal (FastAPI, EJECUTAR ESTE)
-session_manager.py       ← Gestión de sesiones de vuelo (JSON)
-video_streamer.py        ← Captura USB + WebRTC + grabación MP4
-yolo_processor.py        ← Inferencia YOLOv8 sobre el pipeline de video
-video_calibrate.py       ← Herramienta standalone de calibración de imagen
-video_config.json        ← Configuración de imagen (brillo, WB, etc.)
-frontend-vanilla/
-├── index.html           ← UI en tiempo real (telemetría + video + panel AI)
-├── logs.html            ← Explorador de sesiones
+backend/                     ← Código Python
+├── elrs_backend.py          ← Servidor principal (FastAPI, EJECUTAR ESTE)
+├── session_manager.py       ← Gestión de sesiones de vuelo (JSON)
+├── video_streamer.py        ← Captura USB + WebRTC + grabación MP4
+├── yolo_processor.py        ← Inferencia YOLOv8 sobre el pipeline de video
+├── video_calibrate.py       ← Herramienta standalone de calibración de imagen
+└── video_config.json        ← Configuración de imagen (brillo, WB, etc.)
+frontend/                    ← UI web (vanilla JS, sin build)
+├── index.html               ← UI en tiempo real (telemetría + video + panel AI)
+├── logs.html                ← Explorador de sesiones
 ├── css/main.css
 └── js/
     ├── app.js
@@ -59,20 +68,22 @@ frontend-vanilla/
         ├── PerformanceMonitor.js ← Monitor de latencia (F2)
         ├── VideoPlayer.js        ← Cliente WebRTC (señalización + reconexión)
         └── Utils.js
-models/                  ← Modelos .pt personalizados (se crea automático)
+docs/                        ← ARCHITECTURE, SETUP, ROADMAP, AGENT_HANDOFF
+models/                      ← Modelos .pt personalizados (se crea automático)
 logs/
 ├── session_YYYYMMDD_HHMMSS.json ← Sesiones guardadas
 └── video/                        ← Grabaciones MP4
 ```
 
 Pipeline de video: `captura (OpenCV) → correcciones (WB/gamma) → [YOLO si
-está activo] → WebRTC (aiortc) / grabación MP4`.
+está activo] → WebRTC (aiortc) / grabación MP4`. Diagrama completo de flujo
+de datos en `docs/ARCHITECTURE.md`.
 
 ---
 
 ## 🚀 Instalación y Ejecución
 
-Ver `SETUP.md` para la guía completa con conda (Python 3.11, CPU y GPU).
+Ver `docs/SETUP.md` para la guía completa con conda (Python 3.11, CPU y GPU).
 
 ### Requisitos
 
@@ -91,7 +102,7 @@ pip install -r requirements-yolo.txt   # opcional: pipeline YOLO
 ```
 
 Para GPU con CUDA, instalar torch antes de `requirements-yolo.txt`
-(instrucciones dentro del propio archivo y en `SETUP.md`).
+(instrucciones dentro del propio archivo y en `docs/SETUP.md`).
 
 ### 2. Configurar EdgeTX (RadioMaster TX12)
 
@@ -119,17 +130,17 @@ ls /dev/ttyUSB*
 ### 4. Ejecutar el servidor
 
 ```bash
-python elrs_backend.py --port COM6 --baud 115200
+python backend/elrs_backend.py --port COM6 --baud 115200
 ```
 
 Salida esperada:
 ```
 [VIDEO] Módulo de video cargado correctamente
-ELRS Telemetry Server v2.4.1 | COM6@115200 | http://localhost:8080
+ELRS Telemetry Server v2.5.0 | COM6@115200 | http://localhost:8080
 [SESSION] Nueva sesión: 20260710_180000
 [SESSION] Logs en: A:\...\logs
 [SERIAL] Conectado a COM6 @ 115200 baud
-[SERVER] ELRS Telemetry Server v2.4.1 listo
+[SERVER] ELRS Telemetry Server v2.5.0 listo
 ```
 
 Si faltan las dependencias de video, el servidor arranca igual con el módulo
@@ -148,7 +159,7 @@ de video desactivado (solo telemetría).
 
 ```bash
 # Ejecutar con host 0.0.0.0
-python elrs_backend.py --port COM6 --host 0.0.0.0
+python backend/elrs_backend.py --port COM6 --host 0.0.0.0
 ```
 
 Luego acceder desde cualquier dispositivo en la misma red:
@@ -169,14 +180,14 @@ sincronizado con la sesión. El botón **⚙** abre el panel de ajustes de image
 Para calibrar la imagen fuera del servidor (ventana OpenCV con histograma):
 
 ```bash
-python video_calibrate.py --device 0
+python backend/video_calibrate.py --device 0
 ```
 
 Teclas: `B/b` brillo · `C/c` contraste · `S/s` saturación · `G/g` gamma ·
 `R/r`, `E/e`, `U/u` balance de blancos por canal (R/G/B) · `T` preset cálido ·
 `Y` neutro · `I` **anti-magenta** (recomendado para EasyCap: `wb_r 0.75,
 wb_g 1.10, wb_b 0.75`) · `H` ecualización de histograma · `N` NTSC/PAL ·
-`X` reset · `W` guardar en `video_config.json` · `Q` salir.
+`X` reset · `W` guardar en `backend/video_config.json` · `Q` salir.
 
 El balance de blancos es por software (el driver de la EasyCap no acepta
 `CAP_PROP_WB_*`) y se aplica también al stream del servidor.
@@ -266,7 +277,7 @@ Cada sesión guardada en `logs/session_YYYYMMDD_HHMMSS.json`:
 | `GET` | `/api/video/devices` | Lista capturadoras disponibles |
 | `GET` | `/api/video/status` | Estado del stream y grabación |
 | `GET` | `/api/video/config` | Configuración de imagen actual |
-| `POST` | `/api/video/config` | Actualiza `video_config.json` y aplica al vuelo |
+| `POST` | `/api/video/config` | Actualiza `backend/video_config.json` y aplica al vuelo |
 | `POST` | `/api/video/start` | Iniciar captura (`device_id`, `width`, `height`, `fps`) |
 | `POST` | `/api/video/stop` | Detener captura |
 | `POST` | `/api/video/recording/start` | Grabar MP4 sincronizado con la sesión |
@@ -305,26 +316,26 @@ python -m serial.tools.list_ports
 3. En EdgeTX: Telemetry refresh = Fast
 
 ### Frontend no carga
-- Verificar que `frontend-vanilla/` está junto a `elrs_backend.py`
+- Verificar que `frontend/` está en la raíz del repo (el backend lo resuelve
+  desde `backend/` con ruta relativa)
 - Abrir `http://localhost:8080` (no `file://`)
 
 ### El stream FPV falla al cargar la página (404 / MIME error en consola)
 - `index.html` importa `./js/modules/VideoPlayer.js`. Verificar que el
-  archivo existe en `frontend-vanilla/js/modules/` — **no** en la raíz del
-  proyecto. Este bug reapareció en varias sesiones cuando el archivo se
-  generaba en la ubicación equivocada.
+  archivo existe en `frontend/js/modules/`. Este bug reapareció en varias
+  sesiones cuando el archivo se generaba en la ubicación equivocada.
 
 ### La capturadora no aparece en la lista de dispositivos
 - Las EasyCap se registran en Windows bajo la clase PnP `Media` o `Image`,
   no `Camera`. Desde v2.4.1 la enumeración usa `Win32_PnPEntity` con las
   tres clases, y abre por índice con `CAP_MSMF` primero (OpenCV 4.8+).
-- Probar la capturadora directamente: `python video_streamer.py --device 0`
+- Probar la capturadora directamente: `python backend/video_streamer.py --device 0`
 
 ### Imagen con tinte violeta/magenta (EasyCap)
 - El driver no corrige el balance de blancos. Ejecutar
-  `python video_calibrate.py` y presionar `I` (preset anti-magenta), ajustar
-  con `R/E/U` si hace falta, y `W` para guardar. El servidor aplica la
-  corrección por software en cada frame.
+  `python backend/video_calibrate.py` y presionar `I` (preset anti-magenta),
+  ajustar con `R/E/U` si hace falta, y `W` para guardar. El servidor aplica
+  la corrección por software en cada frame.
 
 ### El servidor no arranca tras tocar el módulo de video
 - Desde v2.4.1 cualquier excepción al cargar `video_streamer.py` solo
@@ -338,27 +349,31 @@ python -m serial.tools.list_ports
 
 ```
 .
-├── elrs_backend.py          ← Servidor principal (EJECUTAR ESTE)
-├── session_manager.py       ← Módulo de sesiones (no ejecutar solo)
-├── video_streamer.py        ← Video FPV: captura + WebRTC + grabación
-├── yolo_processor.py        ← Inferencia YOLO (opcional)
-├── video_calibrate.py       ← Calibración de imagen (standalone)
-├── video_config.json        ← Config de imagen generada por la calibración
-├── requirements.txt         ← Dependencias core
-├── requirements-yolo.txt    ← Dependencias opcionales de visión
-├── frontend-vanilla/        ← Interfaz web (servida por el backend)
+├── backend/                 ← Código Python
+│   ├── elrs_backend.py      ← Servidor principal (EJECUTAR ESTE)
+│   ├── session_manager.py   ← Módulo de sesiones (no ejecutar solo)
+│   ├── video_streamer.py    ← Video FPV: captura + WebRTC + grabación
+│   ├── yolo_processor.py    ← Inferencia YOLO (opcional)
+│   ├── video_calibrate.py   ← Calibración de imagen (standalone)
+│   └── video_config.json    ← Config de imagen generada por la calibración
+├── frontend/                ← Interfaz web (servida por el backend)
 │   ├── index.html
 │   ├── logs.html
 │   ├── css/
 │   └── js/
 │       └── modules/         ← Incluye VideoPlayer.js (cliente WebRTC)
-├── models/                  ← Modelos YOLO .pt (se crea automático)
-├── logs/                    ← Sesiones guardadas (se crea automático)
+├── docs/
+│   ├── ARCHITECTURE.md      ← Resumen arquitectónico y librerías (onboarding)
+│   ├── SETUP.md             ← Guía de instalación con conda (CPU/GPU)
+│   ├── ROADMAP.md           ← Trabajo futuro (no mezclar con este README)
+│   └── AGENT_HANDOFF.md     ← Reglas de mantenimiento de la documentación
+├── models/                  ← Modelos YOLO .pt (se crea automático, fuera de git)
+├── logs/                    ← Sesiones guardadas (se crea automático, fuera de git)
 │   ├── session_*.json
 │   └── video/               ← Grabaciones MP4
-├── SETUP.md                 ← Guía de instalación con conda (CPU/GPU)
+├── requirements.txt         ← Dependencias core
+├── requirements-yolo.txt    ← Dependencias opcionales de visión
+├── .gitignore
 ├── CHANGELOG.md             ← Historial de cambios
-├── ROADMAP.md               ← Trabajo futuro (no mezclar con este README)
-├── AGENT_HANDOFF.md         ← Reglas de mantenimiento de la documentación
 └── README.md
 ```

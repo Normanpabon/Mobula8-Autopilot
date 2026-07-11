@@ -5,13 +5,14 @@ de `README.md`. El README describe el sistema **tal como funciona hoy**; este
 archivo describe **hacia dónde va**. Ver `AGENT_HANDOFF.md` para las reglas
 de cómo mantener ambos documentos.
 
-Última actualización: 2026-07-10 (tras v2.4.1).
+Última actualización: 2026-07-10 (tras v2.5.0 — reestructuración en
+`backend/` + `frontend/` + `docs/`, ver `ARCHITECTURE.md`).
 
 ---
 
 ## 🔴 Bloqueante — antes de cualquier otra cosa
 
-- [ ] **Validar en runtime** las correcciones de v2.4.1 con hardware real
+- [ ] **Validar en runtime** las correcciones de v2.4.1/v2.5.0 con hardware real
       (TX12 + Mobula8 + EasyCap conectados). Todo se verificó por importación
       del backend, `py_compile` y `node --check`, no por ejecución del stream
       WebRTC real.
@@ -24,8 +25,8 @@ de cómo mantener ambos documentos.
 - [ ] Confirmar que el balance de blancos por canal (`wb_r/wb_g/wb_b`) corrige
       el tinte magenta de la EasyCap en la práctica; ajustar el preset
       `anti_magenta` (`wb_r: 0.75, wb_g: 1.10, wb_b: 0.75`) si el valor real
-      difiere. Usar `python video_calibrate.py` (tecla `I` aplica el preset,
-      `R/E/U` ajustan por canal, `W` guarda).
+      difiere. Usar `python backend/video_calibrate.py` (tecla `I` aplica el
+      preset, `R/E/U` ajustan por canal, `W` guarda).
 - [ ] Validar el pipeline YOLO (v2.4.0) sobre el stream real: FPS de
       inferencia alcanzable en el laptop, impacto en la latencia WebRTC
       (~150–250 ms de aiortc + ~50–100 ms de la EasyCap), y si conviene
@@ -35,8 +36,8 @@ de cómo mantener ambos documentos.
 - [ ] Comparación de sesiones: superponer métricas de dos o más vuelos en
       `logs.html`.
 - [ ] Alertas configurables por umbral (voltaje mínimo, RSSI, pérdida de LQ).
-- [ ] Añadir `.gitignore` para `__pycache__/` (hoy los `.pyc` están trackeados
-      en git y se "modifican" con cada ejecución).
+- [x] ~~Añadir `.gitignore` para `__pycache__/`~~ — resuelto en v2.5.0
+      (`.gitignore` creado; `__pycache__/` fuera del tracking).
 
 ## 🟢 Medio plazo — Fase 3: Inyección de comandos EdgeTX
 

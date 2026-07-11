@@ -65,7 +65,7 @@ python -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_
 
 ```bash
 conda activate mobula8
-python elrs_backend.py --port COM6 --baud 115200
+python backend/elrs_backend.py --port COM6 --baud 115200
 ```
 
 Abre el navegador en `http://localhost:8080`.
@@ -86,7 +86,7 @@ Parámetros disponibles:
 ## 5. Calibrar video (opcional)
 
 ```bash
-python video_calibrate.py --device 0
+python backend/video_calibrate.py --device 0
 ```
 
 Controles: `B/C/S/G` ajustan brillo/contraste/saturación/gamma. `W` guarda en `video_config.json`.
@@ -118,16 +118,20 @@ conda env create -f environment.yml
 
 ```
 Mobula8-Autopilot/
-├── elrs_backend.py        # Servidor principal — punto de entrada
-├── video_streamer.py      # Captura USB + WebRTC
-├── yolo_processor.py      # Pipeline YOLO (requiere ultralytics)
-├── session_manager.py     # Persistencia de sesiones de vuelo
-├── video_calibrate.py     # Herramienta de calibración de color
-├── video_config.json      # Configuración de video guardada
+├── backend/
+│   ├── elrs_backend.py    # Servidor principal — punto de entrada
+│   ├── video_streamer.py  # Captura USB + WebRTC
+│   ├── yolo_processor.py  # Pipeline YOLO (requiere ultralytics)
+│   ├── session_manager.py # Persistencia de sesiones de vuelo
+│   ├── video_calibrate.py # Herramienta de calibración de color
+│   └── video_config.json  # Configuración de video guardada
+├── frontend/              # UI web (sin npm, vanilla JS)
+│   ├── index.html         # Dashboard principal
+│   └── logs.html          # Explorador de sesiones
+├── docs/                  # SETUP, ARCHITECTURE, ROADMAP, AGENT_HANDOFF
 ├── models/                # Coloca aquí modelos .pt personalizados
-├── logs/                  # Sesiones JSON y videos grabados
-│   └── video/
-└── frontend-vanilla/      # UI web (sin npm, vanilla JS)
-    ├── index.html          # Dashboard principal
-    └── logs.html           # Explorador de sesiones
+└── logs/                  # Sesiones JSON y videos grabados
+    └── video/
 ```
+
+Ver `docs/ARCHITECTURE.md` para el detalle de módulos, librerías y flujo de datos.

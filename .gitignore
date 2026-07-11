@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Datos generados en runtime (no versionar)
+logs/
+models/
+
+# Entornos
+.venv/
+venv/
+.conda/
+
+# Editor
+.vscode/
+.idea/

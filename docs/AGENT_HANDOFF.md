@@ -1,7 +1,8 @@
 # Reglas de mantenimiento de documentación — Mobula8-Autopilot
 
-Este archivo define cómo mantener `README.md`, `ROADMAP.md` y `CHANGELOG.md`.
-Cualquier agente o sesión que toque el proyecto debe seguir estas reglas.
+Este archivo define cómo mantener `README.md`, `docs/ARCHITECTURE.md`,
+`docs/ROADMAP.md` y `CHANGELOG.md`. Cualquier agente o sesión que toque el
+proyecto debe seguir estas reglas.
 
 ## Regla cero: partir del repo, no de copias
 
@@ -13,9 +14,26 @@ v2.4.1 en `CHANGELOG.md`).
 
 ## División de responsabilidades
 
-- **`README.md`** — el sistema **tal como funciona hoy**. Nada de futuro.
-- **`ROADMAP.md`** — **hacia dónde va**. Toda mejora no implementada va aquí.
-- **`CHANGELOG.md`** — qué cambió y cuándo, formato Keep a Changelog.
+- **`README.md`** (raíz) — el sistema **tal como funciona hoy**, orientado a
+  usarlo. Nada de futuro.
+- **`docs/ARCHITECTURE.md`** — resumen arquitectónico para onboarding:
+  módulos y su responsabilidad, librerías y su propósito, flujo de datos,
+  decisiones de diseño. Si una sesión añade/quita una librería o módulo, o
+  cambia una decisión de arquitectura, este archivo se actualiza en el
+  mismo turno.
+- **`docs/ROADMAP.md`** — **hacia dónde va**. Toda mejora no implementada va aquí.
+- **`docs/SETUP.md`** — instalación del entorno (conda, CPU/GPU).
+- **`CHANGELOG.md`** (raíz) — qué cambió y cuándo, formato Keep a Changelog.
+
+## Estructura de carpetas (desde v2.5.0)
+
+- `backend/` — todo el código Python. Punto de entrada:
+  `python backend/elrs_backend.py`. Los módulos llegan a la raíz del repo
+  con `Path(__file__).resolve().parent.parent` (para `logs/`, `models/`,
+  `frontend/`); `video_config.json` vive junto al código en `backend/`.
+- `frontend/` — la UI web (antes `frontend-vanilla/`).
+- `docs/` — toda la documentación salvo `README.md` y `CHANGELOG.md`.
+- `logs/` y `models/` — datos de runtime, fuera de git (`.gitignore`).
 
 ## Reglas fijas del README
 
@@ -31,7 +49,7 @@ v2.4.1 en `CHANGELOG.md`).
   - La versión en el texto de "Salida esperada" del paso de instalación y
     cualquier referencia a versión del servidor deben coincidir con el
     valor de `version=` en el constructor de `FastAPI(...)` en
-    `elrs_backend.py` y con la última entrada de `CHANGELOG.md`.
+    `backend/elrs_backend.py` y con la última entrada de `CHANGELOG.md`.
   - `## 🗂️ Formato de sesiones JSON` — si `session_manager.py` cambia el
     esquema del summary o de los frames, actualizar el ejemplo JSON.
   - `## 🛠️ Troubleshooting` — cada bug recurrente que se corrija por
