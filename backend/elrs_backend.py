@@ -214,7 +214,7 @@ async def websocket_endpoint(ws: WebSocket):
 async def get_status():
     if system_status["start_time"]:
         system_status["uptime_seconds"] = int((datetime.now(timezone.utc) - system_status["start_time"]).total_seconds())
-    return JSONResponse(system_status)
+    return JSONResponse({**system_status, "start_time": system_status["start_time"].isoformat() if system_status["start_time"] else None})
 
 @app.get("/api/history")
 async def get_history(limit: int = 100):
