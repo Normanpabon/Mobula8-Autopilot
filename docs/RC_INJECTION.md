@@ -4,7 +4,10 @@ Diseño de `backend/command_injector.py` (v2.7.0): cómo el PC envía comandos
 RC a la TX12 por USB serial, qué garantías de seguridad tiene, y cuál es la
 incógnita de protocolo que solo el hardware puede responder.
 
-Última actualización: 2026-07-11 (v2.7.0).
+Última revisión: 2026-09-21, código base v2.7.0. Ver
+[`REVISION_DEBIAN13.md`](REVISION_DEBIAN13.md) para los defectos observados y
+el plan de banco en Linux. Las pruebas históricas con loopback no validan
+la radio ni todos los casos de pérdida de mando.
 
 ---
 
@@ -49,8 +52,17 @@ comando:
 El deadman también aplica **antes del primer comando** (al habilitar, el
 injector arranca en failsafe hasta que alguien comande algo) y cubre la
 muerte del navegador: el panel de la UI envía a 10 Hz fijos por
-`WS /ws/rc`, así que si la pestaña se cierra o la red se cae, en ≤500 ms
-los canales vuelven a failsafe.
+`WS /ws/rc`, así que si la pestaña se cierra o la red se cae, al superar
+500 ms más el periodo de envío y el jitter los canales
+transmitidos pasan a failsafe, mientras el proceso y su event loop sigan
+funcionando. No es una garantía de tiempo real.
+
+**Limitaciones verificadas (2026-09-21):** desconectar el gamepad conserva
+sus últimos valores en sliders y la UI sigue enviándolos, impidiendo que
+expire el deadman. Al expirar en backend tampoco se borran las consignas:
+una actualización parcial puede reactivar throttle antiguo. Deben corregirse
+antes de pruebas físicas de control. `channels_us` muestra el estado
+almacenado, no necesariamente los canales de failsafe transmitidos.
 
 Nota de alcance: el deadman protege del lado PC. La red de seguridad final
 sigue siendo el failsafe del propio ELRS/Betaflight (pérdida de RF ⇒ drop),
@@ -62,8 +74,9 @@ que es independiente de este sistema.
   está conectado.
 - Al habilitar, los canales se resetean a failsafe (nunca se retoma un
   estado viejo).
-- Deshabilitar detiene el envío por completo (la TX12 vuelve a mandar
-  exclusivamente sus propios gimbals).
+- Deshabilitar detiene el envío por completo. La recuperación de mando por
+  los gimbals depende de la ruta de entrada elegida y debe verificarse;
+  detener el envío por sí solo no acredita esa recuperación.
 
 ## 3. La incógnita de protocolo (pendiente de hardware)
 
@@ -71,21 +84,27 @@ que es independiente de este sistema.
 modo Telem Mirror** — ese modo está documentado como espejo de *salida* de
 telemetría. Es el ítem "pendiente de validación de protocolo" del roadmap
 desde que se planeó la Fase 3. El plan de validación
-(`HARDWARE_VALIDATION.md` §7) prueba, en orden:
+(`HARDWARE_VALIDATION.md` §4b) prueba, en orden:
 
 1. Frames con dirección `0xEE` (módulo transmisor) — default del injector.
 2. `0xEA` (radio) y `0xC8` (FC) — el `sync_byte` es configurable por API
    precisamente para esto.
-3. Si la TX12 ignora todo CRSF entrante: **plan B = modo Joystick USB HID**
-   de EdgeTX (el PC no inyecta; la radio expone entrenador/joystick). Eso
-   invertiría el flujo (la radio lee al PC como joystick virtual, lo que en
-   Windows requiere un driver de joystick virtual tipo vJoy) o exigiría un
-   módulo ELRS externo en la bahía JR hablando CRSF directo. Decisión para
-   cuando haya datos.
+3. Si el firmware no implementa entrada RC por VCP, elegir otra ruta:
+   adaptador hacia una entrada trainer compatible con la radio (PPM/SBUS,
+   según hardware), o interfaz CRSF con un módulo ELRS externo. Ambas
+   requieren diseño y validación de niveles eléctricos, prioridad de mando
+   y failsafe antes de conectarlas.
 
-Mientras tanto, todo el lado PC (frames, CRC, deadman, API, UI) está
-implementado y probado con un serial loopback, de modo que la sesión de
-validación con hardware solo tenga que responder la pregunta de protocolo.
+**Corrección del plan B anterior:** USB Joystick HID expone la radio como
+mando al PC; no permite inyectar canales del PC hacia la radio. Un joystick
+virtual en Linux/Windows no invierte esa dirección. Referencias oficiales:
+[hardware/Telem Mirror](https://manual.edgetx.org/v2.11/bw-radios/radio-settings/hardware)
+y [joystick](https://manual.edgetx.org/edgetx-how-to/configure-advanced-joystick-with-edgetx).
+Cambiar la dirección CRSF no agrega soporte de entrada al firmware.
+
+El lado PC está implementado y el historial reporta pruebas con loopback.
+La revisión actual verificó frames/CRC y timeout con una salida simulada;
+protocolo, recuperación de mando y seguridad con hardware siguen pendientes.
 
 ## 4. Seguridad operacional (para las pruebas con hardware)
 
@@ -93,7 +112,7 @@ validación con hardware solo tenga que responder la pregunta de protocolo.
    la radio reacciona (pantalla de canales / mixer) a los frames inyectados.
 2. Segunda prueba con el Mobula8 **sin hélices**.
 3. Nunca habilitar la inyección con el drone armado y con hélices hasta que
-   el deadman esté validado en runtime (checklist §7).
+   el deadman esté validado en runtime (checklist §4b).
 4. El panel RC de la UI muestra el estado del deadman en vivo
    (`OFF` / `FAILSAFE` / `LIVE`) y el contador de frames enviados.
 

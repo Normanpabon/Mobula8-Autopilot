@@ -8,25 +8,28 @@ Dependencias:
     pip install aiortc opencv-python
 
 Uso independiente (test):
-    python video_streamer.py --device 0 --width 1280 --height 720
+    python video_streamer.py --device 0 --width 720 --height 480
 """
-
+import sys
+import os
 import asyncio
 import concurrent.futures
+import subprocess
 import platform
 import time
 import logging
+import math
+import fractions
+import json
+from uuid import uuid4
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Dict
-import fractions
 
 import cv2
 import numpy as np
-import json
 
 from aiortc import MediaStreamTrack, RTCPeerConnection, RTCSessionDescription
-from aiortc.contrib.media import MediaPlayer
 from av import VideoFrame
 
 log = logging.getLogger("video_streamer")
@@ -38,6 +41,7 @@ CONFIG_FILE = Path(__file__).parent / "video_config.json"
 VIDEO_DIR.mkdir(parents=True, exist_ok=True)
 
 IS_WINDOWS = platform.system() == "Windows"
+NTSC_FPS = 30000 / 1001
 
 
 def _open_capture(device_id: int) -> cv2.VideoCapture:
@@ -46,7 +50,12 @@ def _open_capture(device_id: int) -> cv2.VideoCapture:
     OpenCV 4.8+ en Windows: MSMF es el backend fiable para apertura
     por índice; DSHOW queda como fallback.
     """
-    backends = [cv2.CAP_MSMF, cv2.CAP_DSHOW] if IS_WINDOWS else [cv2.CAP_ANY]
+    if IS_WINDOWS:
+        backends = [cv2.CAP_MSMF, cv2.CAP_DSHOW]
+    elif sys.platform.startswith("linux"):
+        backends = [cv2.CAP_V4L2, cv2.CAP_ANY]
+    else:
+        backends = [cv2.CAP_ANY]
     for be in backends:
         cap = cv2.VideoCapture(device_id, be)
         if cap.isOpened():
@@ -138,18 +147,39 @@ class DeviceManager:
 
     @staticmethod
     def _test_device(idx: int) -> Optional[dict]:
-        """Prueba un índice de dispositivo y retorna su info o None."""
+        log_prefix = f"[Dispositivo {idx}]"
+        logging.debug(f"{log_prefix} Iniciando prueba...")
+        
         try:
             cap = _open_capture(idx)
+            
             if not cap.isOpened():
+                logging.warning(f"{log_prefix} Falló al abrir (isOpened == False). Causas: No existe, sin permisos, o backend no soportado.")
                 return None
-            ret, frame = cap.read()
-            if not ret or frame is None:
+            
+            logging.debug(f"{log_prefix} Abierto correctamente. Intentando leer frames...")
+            
+            frame_valid = False
+            for i in range(10):
+                ret, frame = cap.read()
+                if ret and frame is not None:
+                    logging.debug(f"{log_prefix} Frame válido recibido en el intento {i+1}")
+                    frame_valid = True
+                    break
+                logging.debug(f"{log_prefix} Intento {i+1} fallido (ret={ret}, frame={'Válido' if frame is not None else 'Nulo'})")
+                time.sleep(0.05)
+                
+            if not frame_valid:
+                logging.warning(f"{log_prefix} Se agotaron los intentos para leer un frame. La capturadora no entrega imagen.")
                 cap.release()
                 return None
+                
+            name = DeviceManager.get_device_name(idx)
+            logging.info(f"{log_prefix} Dispositivo detectado exitosamente: {name}")
+            
             result = {
                 "id":        idx,
-                "name":      DeviceManager.get_device_name(idx),
+                "name":      name,
                 "width":     int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
                 "height":    int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)),
                 "fps":       cap.get(cv2.CAP_PROP_FPS) or 30,
@@ -157,193 +187,208 @@ class DeviceManager:
             }
             cap.release()
             return result
-        except Exception:
+            
+        except Exception as e:
+            logging.error(f"{log_prefix} Excepción inesperada: {str(e)}")
             return None
 
     @staticmethod
     def enumerate() -> list[dict]:
-        """
-        Prueba índices 0-4 en paralelo (máx 5 workers) con timeout de 12s total.
-        Usa DirectShow en Windows para menor latencia.
-        """
+        logging.info("Iniciando enumeración de dispositivos (índices 0 al 9)...")
         devices = []
         with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-            futs = [executor.submit(DeviceManager._test_device, idx) for idx in range(5)]
+            futs = [executor.submit(DeviceManager._test_device, idx) for idx in range(10)]
             try:
                 for fut in concurrent.futures.as_completed(futs, timeout=12):
                     try:
                         result = fut.result()
                         if result:
                             devices.append(result)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logging.error(f"Error en el hilo de enumeración: {str(e)}")
             except concurrent.futures.TimeoutError:
-                pass
+                logging.error("Timeout durante la enumeración de dispositivos.")
+                
+        logging.info(f"Enumeración finalizada. Dispositivos listos: {[d['id'] for d in devices]}")
         return sorted(devices, key=lambda d: d["id"])
 
     @staticmethod
-    def _get_pnp_names() -> list[str]:
-        """
-        Nombres de dispositivos via WMI Win32_PnPEntity.
-        Las EasyCap suelen registrarse como clase Media/Image,
-        no Camera, por eso no se usa Get-PnpDevice -Class Camera.
-        """
-        try:
-            import subprocess
-            result = subprocess.run(
-                ["powershell", "-NoProfile", "-Command",
-                 "Get-CimInstance Win32_PnPEntity | "
-                 "Where-Object { $_.PNPClass -in @('Camera','Image','Media') -and $_.Status -eq 'OK' } | "
-                 "Select-Object -ExpandProperty Name"],
-                capture_output=True, text=True, timeout=8
-            )
-            return [l.strip() for l in result.stdout.splitlines() if l.strip()]
-        except Exception:
-            return []
-
-    @staticmethod
-    def get_device_name(device_id: int) -> str:
-        names = DeviceManager._get_pnp_names()
-        if device_id < len(names):
-            return names[device_id]
-        return f"Capture Device {device_id}"
-
+    def get_device_name(idx: int) -> str:
+        if sys.platform == "win32":
+            try:
+                result = subprocess.run(
+                    ["powershell", "-NoProfile", "-Command",
+                     "Get-CimInstance Win32_PnPEntity | "
+                     "Where-Object { $_.PNPClass -in @('Camera','Image','Media') -and $_.Status -eq 'OK' } | "
+                     "Select-Object -ExpandProperty Name"],
+                    capture_output=True, text=True, timeout=8
+                )
+                names = [l.strip() for l in result.stdout.splitlines() if l.strip()]
+                return names[idx] if idx < len(names) else f"Capture Device {idx}"
+            except Exception:
+                return f"Capture Device {idx}"
+        else:
+            sys_path = f"/sys/class/video4l/video{idx}/name"
+            if os.path.exists(sys_path):
+                try:
+                    with open(sys_path, 'r') as f:
+                        return f.read().strip()
+                except Exception:
+                    pass
+            return f"Video Device {idx}"
 
 # ──────────────────────────────────────────────
 # 2. Video Capture (OpenCV)
 # ──────────────────────────────────────────────
 
 class VideoCapture:
-    """Gestiona la captura de frames desde la capturadora USB."""
+    """Captura sin reescalar: el array recibido determina la geometría real."""
 
     def __init__(self):
-        self._cap:      Optional[cv2.VideoCapture] = None
-        self._frame:    Optional[np.ndarray]       = None
-        self._lock      = asyncio.Lock()
-        self._task:     Optional[asyncio.Task]     = None
-        self._cfg:      dict                       = load_video_config()
-
-        self.is_running = False
-        self.device_id  = 0
-        self.width      = 1280
-        self.height     = 720
-        self.fps        = 30.0
-        self.frame_count = 0
-
-    async def start(self, device_id: int = 0,
-                    width: int = 1280, height: int = 720,
-                    fps: int = 30) -> bool:
-        """Abre la capturadora y comienza el loop de lectura."""
-        if self.is_running:
-            await self.stop()
-
-        self.device_id = device_id
-        self.width     = width
-        self.height    = height
-        self.fps       = float(fps)
-
-        # Cargar configuración de calibración
+        self._cap = None
+        self._frame = None
+        self._lock = asyncio.Lock()
+        self._task = None
         self._cfg = load_video_config()
-
-        # MSMF primero en Windows (OpenCV 4.8+ abre por índice con más
-        # fiabilidad); DSHOW queda como fallback dentro de _open_capture
-        cap = _open_capture(device_id)
-
-        if not cap.isOpened():
-            log.error(f"No se pudo abrir dispositivo {device_id}")
-            return False
-
-        # Configurar resolución y FPS
-        fps_target = 29.97 if self._cfg.get("ntsc", True) else 25.0
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH,  width)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
-        cap.set(cv2.CAP_PROP_FPS,          fps_target)
-        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-
-        # Aplicar propiedades de calibración al driver
-        cap.set(cv2.CAP_PROP_BRIGHTNESS,  self._cfg.get("brightness", 0))
-        cap.set(cv2.CAP_PROP_CONTRAST,    self._cfg.get("contrast", 32))
-        cap.set(cv2.CAP_PROP_SATURATION,  self._cfg.get("saturation", 60))
-
-        # Verificar frame
-        ret, frame = cap.read()
-        if not ret or frame is None:
-            cap.release()
-            log.error(f"Dispositivo {device_id} no devuelve frames")
-            return False
-
-        actual_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        actual_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        actual_fps = cap.get(cv2.CAP_PROP_FPS)
-        log.info(f"Capturadora: device={device_id} {actual_w}x{actual_h} @ {actual_fps:.1f}fps | cfg={self._cfg}")
-
-        self._cap        = cap
-        self._frame      = frame
-        self.is_running  = True
+        self.is_running = False
+        self.device_id = 0
+        self.width, self.height = 720, 480
+        self.fps = NTSC_FPS
+        self.requested = {}
+        self.fps_source = "requested"
         self.frame_count = 0
+        self.measured_fps = 0.0
+        self._last_frame_at = None
+        self.error = None
+        self.format_warning = None
 
-        # Loop de lectura en thread separado (sin bloquear el event loop)
+    def _open_configured(self, device_id, width, height, fps):
+        """Operaciones del driver fuera del event loop; algunos ignoran set()."""
+        cap = _open_capture(device_id)
+        try:
+            if not cap.isOpened():
+                raise RuntimeError(f"No se pudo abrir dispositivo {device_id}")
+            for prop, value in (
+                (cv2.CAP_PROP_FRAME_WIDTH, width),
+                (cv2.CAP_PROP_FRAME_HEIGHT, height),
+                (cv2.CAP_PROP_FPS, fps),
+                (cv2.CAP_PROP_BUFFERSIZE, 1),
+                (cv2.CAP_PROP_BRIGHTNESS, self._cfg.get("brightness", 0)),
+                (cv2.CAP_PROP_CONTRAST, self._cfg.get("contrast", 32)),
+                (cv2.CAP_PROP_SATURATION, self._cfg.get("saturation", 60)),
+            ):
+                cap.set(prop, value)
+            for _ in range(10):
+                ret, frame = cap.read()
+                if ret and frame is not None and frame.size:
+                    return cap, frame, cap.get(cv2.CAP_PROP_FPS)
+                time.sleep(0.05)
+            raise RuntimeError(f"Dispositivo {device_id} no devuelve frames")
+        except Exception:
+            cap.release()
+            raise
+
+    async def start(self, device_id: int = 0, width: int = 720,
+                    height: int = 480, fps: Optional[float] = None) -> bool:
+        await self.stop()
+        self._cfg = load_video_config()
+        target_fps = float(fps if fps is not None else
+                           (NTSC_FPS if self._cfg.get("ntsc", True) else 25))
+        if width <= 0 or height <= 0 or not math.isfinite(target_fps) or target_fps <= 0:
+            raise ValueError("Resolución y FPS deben ser positivos y finitos")
+        self.device_id = device_id
+        self.requested = {"width": width, "height": height, "fps": target_fps}
+        self.error = self.format_warning = None
+        self.measured_fps = 0.0
+        self.frame_count = 0
+        try:
+            cap, frame, driver_fps = await asyncio.to_thread(
+                self._open_configured, device_id, width, height, target_fps)
+        except Exception as exc:
+            self.error = str(exc)
+            log.error(self.error)
+            return False
+        self._cap = cap
+        self.height, self.width = frame.shape[:2]
+        valid_fps = math.isfinite(driver_fps) and 0 < driver_fps <= 240
+        self.fps = float(driver_fps) if valid_fps else target_fps
+        self.fps_source = "driver" if valid_fps else "requested_fallback"
+        if (self.width, self.height) != (width, height) or abs(self.fps - target_fps) > 0.1:
+            self.format_warning = (
+                f"Pedido {width}×{height} @ {target_fps:.2f}; "
+                f"capturadora entrega {self.width}×{self.height} @ {self.fps:.2f}")
+            log.warning(self.format_warning)
+        self._frame = apply_software_correction(frame, self._cfg)
+        self._last_frame_at = time.monotonic()
+        self.is_running = True
         self._task = asyncio.create_task(self._read_loop())
+        log.info("Captura real: %sx%s @ %.3f FPS (%s)",
+                 self.width, self.height, self.fps, self.fps_source)
         return True
 
     async def stop(self):
-        """Detiene la captura y libera recursos."""
         self.is_running = False
         if self._task:
-            self._task.cancel()
-            try:
-                await self._task
-            except asyncio.CancelledError:
-                pass
+            # Esperar la lectura en curso antes de release: cancelar el await
+            # no detiene un read() que ya corre en el executor.
+            await self._task
             self._task = None
-        if self._cap:
+        if self._cap is not None:
             self._cap.release()
             self._cap = None
-        log.info("Capturadora detenida")
+        self._frame = None
+        self._last_frame_at = None
 
     async def _read_loop(self):
-        """Lee frames continuamente en background."""
-        loop = asyncio.get_event_loop()
-        while self.is_running and self._cap:
+        window_start, count = time.monotonic(), 0
+        while self.is_running and self._cap is not None:
             try:
-                # Leer en executor para no bloquear event loop
-                ret, frame = await loop.run_in_executor(
-                    None, self._cap.read
-                )
+                ret, frame = await asyncio.to_thread(self._cap.read)
+                if not self.is_running:
+                    break
                 if ret and frame is not None:
-                    # Aplicar correcciones de software (gamma, hist eq)
+                    if frame.shape[:2] != (self.height, self.width):
+                        raise RuntimeError("El formato cambió durante la captura; reinicia el stream")
                     corrected = apply_software_correction(frame, self._cfg)
                     async with self._lock:
                         self._frame = corrected
                         self.frame_count += 1
+                        self._last_frame_at = time.monotonic()
+                    count += 1
+                    elapsed = self._last_frame_at - window_start
+                    if elapsed >= 1:
+                        self.measured_fps = count / elapsed
+                        window_start, count = self._last_frame_at, 0
                 else:
+                    if time.monotonic() - self._last_frame_at > 2:
+                        raise RuntimeError("Sin frames de la capturadora durante más de 2 s")
                     await asyncio.sleep(0.01)
-            except Exception as e:
-                log.error(f"Error leyendo frame: {e}")
-                await asyncio.sleep(0.1)
+            except Exception as exc:
+                self.error = str(exc)
+                self.is_running = False
+                log.error("Captura detenida: %s", exc)
 
     async def get_frame(self) -> Optional[np.ndarray]:
-        """Retorna el último frame capturado (BGR)."""
         async with self._lock:
-            return self._frame.copy() if self._frame is not None else None
+            fresh = self._last_frame_at is not None and time.monotonic() - self._last_frame_at < 2
+            return self._frame.copy() if self.is_running and fresh and self._frame is not None else None
 
     def update_config(self, cfg: dict) -> None:
-        """Aplica nueva configuración al stream en curso sin reiniciarlo."""
         self._cfg = {**self._cfg, **cfg}
-        if self._cap:
-            self._cap.set(cv2.CAP_PROP_BRIGHTNESS,  self._cfg.get("brightness", 0))
-            self._cap.set(cv2.CAP_PROP_CONTRAST,    self._cfg.get("contrast", 32))
-            self._cap.set(cv2.CAP_PROP_SATURATION,  self._cfg.get("saturation", 60))
+        if self._cap is not None:
+            self._cap.set(cv2.CAP_PROP_BRIGHTNESS, self._cfg.get("brightness", 0))
+            self._cap.set(cv2.CAP_PROP_CONTRAST, self._cfg.get("contrast", 32))
+            self._cap.set(cv2.CAP_PROP_SATURATION, self._cfg.get("saturation", 60))
 
     @property
     def status(self) -> dict:
         return {
-            "running":     self.is_running,
-            "device_id":   self.device_id,
-            "width":       self.width,
-            "height":      self.height,
-            "fps":         self.fps,
-            "frame_count": self.frame_count,
+            "running": self.is_running, "device_id": self.device_id,
+            "width": self.width, "height": self.height, "fps": self.fps,
+            "fps_source": self.fps_source, "requested": self.requested,
+            "measured_fps": round(self.measured_fps, 2) if self.is_running else 0,
+            "frame_count": self.frame_count, "error": self.error,
+            "format_warning": self.format_warning,
         }
 
 
@@ -358,7 +403,7 @@ class FPVVideoTrack(MediaStreamTrack):
     """
     kind = "video"
 
-    def __init__(self, frame_getter, width: int = 1280, height: int = 720, fps: float = 30):
+    def __init__(self, frame_getter, width: int = 720, height: int = 480, fps: float = 30):
         super().__init__()
         self._get_frame = frame_getter   # async callable → Optional[np.ndarray] BGR
         self._width     = width
@@ -388,96 +433,74 @@ class FPVVideoTrack(MediaStreamTrack):
 # ──────────────────────────────────────────────
 
 class VideoRecorder:
-    """
-    Graba el video de la capturadora en un archivo MP4,
-    sincronizado con la sesión de telemetría activa.
-    """
+    """Una toma por archivo, con geometría igual a los frames capturados."""
 
     def __init__(self):
-        self._writer:     Optional[cv2.VideoWriter] = None
-        self._session_id: Optional[str]             = None
-        self._start_time: Optional[float]           = None
+        self._writer = None
+        self._session_id = None
+        self._start_time = None
+        self._duration = 0
         self._frame_count = 0
+        self._size = None
         self.is_recording = False
-        self.output_path: Optional[str]             = None
+        self.output_path = None
+        self.error = None
 
-    def start(self, session_id: str,
-              width: int, height: int, fps: float = 30.0) -> str:
-        """Comienza la grabación."""
+    def start(self, session_id: str, width: int, height: int,
+              fps: float = NTSC_FPS) -> str:
         if self.is_recording:
-            self.stop()
-
-        self._session_id = session_id
-        self._start_time = time.time()
+            return self.output_path
+        self.error = None
+        self.output_path = None
         self._frame_count = 0
-
-        filename = f"video_{session_id}.mp4"
-        path     = VIDEO_DIR / filename
-        self.output_path = str(path)
-
-        # Codec MP4 (H.264 via FFmpeg)
-        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-        self._writer = cv2.VideoWriter(
-            self.output_path, fourcc, fps, (width, height)
-        )
-
-        if not self._writer.isOpened():
-            # Fallback a AVI
-            filename = f"video_{session_id}.avi"
-            path     = VIDEO_DIR / filename
-            self.output_path = str(path)
-            fourcc  = cv2.VideoWriter_fourcc(*"XVID")
-            self._writer = cv2.VideoWriter(
-                self.output_path, fourcc, fps, (width, height)
-            )
-
-        self.is_recording = True
-        log.info(f"Grabación iniciada: {self.output_path}")
-        return self.output_path
+        self._duration = 0
+        self._session_id = session_id
+        self._size = (width, height)
+        take = uuid4().hex[:12]
+        # mp4v = MPEG-4 Part 2. AVI/XVID es un fallback, no H.264.
+        for ext, codec in (("mp4", "mp4v"), ("avi", "XVID")):
+            path = VIDEO_DIR / f"video_{session_id}_{take}.{ext}"
+            writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*codec), fps, self._size)
+            if writer.isOpened():
+                self._writer = writer
+                self.output_path = str(path)
+                self._start_time = time.monotonic()
+                self.is_recording = True
+                return self.output_path
+            writer.release()
+        self.error = "No se pudo abrir ningún encoder de video (MP4/AVI)"
+        raise RuntimeError(self.error)
 
     def write_frame(self, frame: np.ndarray) -> None:
-        """Escribe un frame en el archivo."""
-        if self._writer and self.is_recording and frame is not None:
-            self._writer.write(frame)
-            self._frame_count += 1
+        if self._writer is None or not self.is_recording:
+            return
+        if frame is None or (frame.shape[1], frame.shape[0]) != self._size:
+            self.error = "El tamaño del frame no coincide con el de la grabación"
+            raise RuntimeError(self.error)
+        self._writer.write(frame)
+        self._frame_count += 1
 
     def stop(self) -> Optional[str]:
-        """Detiene la grabación y retorna el path del archivo."""
         if not self.is_recording:
-            return None
-
+            return self.output_path
         self.is_recording = False
-        if self._writer:
+        self._duration = time.monotonic() - self._start_time
+        if self._writer is not None:
             self._writer.release()
             self._writer = None
-
-        duration = time.time() - self._start_time if self._start_time else 0
-        size_mb  = 0
-        if self.output_path:
-            p = Path(self.output_path)
-            if p.exists():
-                size_mb = p.stat().st_size / (1024 * 1024)
-
-        log.info(
-            f"Grabación detenida: {self._frame_count} frames, "
-            f"{duration:.1f}s, {size_mb:.1f} MB → {self.output_path}"
-        )
+        if self._frame_count == 0:
+            self.error = self.error or "La toma terminó sin frames; archivo no validado"
+        log.info("Grabación cerrada: %s frames → %s", self._frame_count, self.output_path)
         return self.output_path
 
     @property
     def status(self) -> dict:
-        duration = (time.time() - self._start_time) if (self._recording and self._start_time) else 0
+        duration = time.monotonic() - self._start_time if self.is_recording else self._duration
         return {
-            "recording":    self.is_recording,
-            "session_id":   self._session_id,
-            "frame_count":  self._frame_count,
-            "duration_s":   round(duration, 1),
-            "output_path":  self.output_path,
+            "recording": self.is_recording, "session_id": self._session_id,
+            "frame_count": self._frame_count, "duration_s": round(duration, 1),
+            "output_path": self.output_path, "error": self.error,
         }
-
-    @property
-    def _recording(self):
-        return self.is_recording
 
 
 # ──────────────────────────────────────────────
@@ -491,7 +514,7 @@ class WebRTCManager:
     y permitir inyectar pasos intermedios (YOLO, overlay, etc.).
     """
 
-    def __init__(self, frame_getter, width: int = 1280, height: int = 720, fps: float = 30):
+    def __init__(self, frame_getter, width: int = 720, height: int = 480, fps: float = 30):
         self._frame_getter = frame_getter
         self._width        = width
         self._height       = height
@@ -569,6 +592,8 @@ class VideoStreamer:
         self.capture  = VideoCapture()
         self.recorder = VideoRecorder()
         self.webrtc:  Optional[WebRTCManager] = None
+        self._record_task = None
+        self._lifecycle_lock = asyncio.Lock()
 
         # Visión (opcional — no falla si ultralytics no está instalado;
         # los procesadores reportan available=False y los endpoints responden 503)
@@ -593,26 +618,37 @@ class VideoStreamer:
         return frame
 
     async def start_capture(self, device_id: int = 0,
-                            width: int = 1280, height: int = 720,
-                            fps: int = 30) -> bool:
-        """Inicia la captura, el loop de visión y habilita WebRTC."""
-        ok = await self.capture.start(device_id, width, height, fps)
-        if ok:
-            self.webrtc = WebRTCManager(
-                self._get_display_frame,
-                self.capture.width,
-                self.capture.height,
-                self.capture.fps,
-            )
-            if self.vision:
-                self.vision.start(self.capture.get_frame)
-            log.info("VideoStreamer listo")
-        return ok
+                            width: int = 720, height: int = 480,
+                            fps: Optional[float] = None) -> bool:
+        async with self._lifecycle_lock:
+            requested = self.capture.requested
+            if (self.capture.is_running and device_id == self.capture.device_id
+                    and width == requested.get("width") and height == requested.get("height")
+                    and (fps is None or fps == requested.get("fps"))):
+                return True  # Reconectar un navegador no reinicia captura/grabación.
+            if self.recorder.is_recording:
+                raise RuntimeError("Detén la grabación antes de cambiar la captura")
+            await self._stop_capture()
+            ok = await self.capture.start(device_id, width, height, fps)
+            if ok:
+                self.webrtc = WebRTCManager(self._get_display_frame,
+                    self.capture.width, self.capture.height, self.capture.fps)
+                if self.vision:
+                    self.vision.start(self.capture.get_frame)
+            return ok
 
-    async def stop_capture(self):
-        """Detiene todo: visión, captura, WebRTC y grabación."""
-        if self.recorder.is_recording:
-            self.recorder.stop()
+    async def _stop_recording(self):
+        if self._record_task:
+            self._record_task.cancel()
+            try:
+                await self._record_task
+            except asyncio.CancelledError:
+                pass
+            self._record_task = None
+        return self.recorder.stop()
+
+    async def _stop_capture(self):
+        await self._stop_recording()
         if self.vision:
             await self.vision.stop()
         if self.webrtc:
@@ -620,37 +656,50 @@ class VideoStreamer:
             self.webrtc = None
         await self.capture.stop()
 
+    async def stop_capture(self):
+        async with self._lifecycle_lock:
+            await self._stop_capture()
+
     async def handle_offer(self, sdp: str, sdp_type: str, peer_id: str) -> Optional[dict]:
-        """Delega al WebRTC manager."""
         if not self.webrtc:
             return None
         return await self.webrtc.handle_offer(sdp, sdp_type, peer_id)
 
-    def start_recording(self, session_id: str) -> Optional[str]:
-        """Inicia la grabación sincronizada con una sesión de telemetría."""
-        if not self.capture.is_running:
-            return None
-        path = self.recorder.start(
-            session_id,
-            self.capture.width,
-            self.capture.height,
-            self.capture.fps,
-        )
-        # Iniciar loop de grabación
-        asyncio.create_task(self._record_loop())
-        return path
+    async def start_recording(self, session_id: str) -> str:
+        async with self._lifecycle_lock:
+            if self.recorder.is_recording:
+                return self.recorder.output_path
+            frame = await self.capture.get_frame()
+            if frame is None:
+                raise RuntimeError("No hay un frame reciente para grabar")
+            path = self.recorder.start(session_id, frame.shape[1], frame.shape[0], self.capture.fps)
+            self._record_task = asyncio.create_task(self._record_loop())
+            return path
 
     async def _record_loop(self):
-        """Loop que escribe frames al archivo de video."""
-        while self.recorder.is_recording:
-            frame = await self.capture.get_frame()
-            if frame is not None:
+        deadline = time.monotonic()
+        try:
+            while self.recorder.is_recording:
+                frame = await self.capture.get_frame()
+                if frame is None:
+                    raise RuntimeError("Grabación detenida: no hay video reciente")
                 self.recorder.write_frame(frame)
-            await asyncio.sleep(1.0 / (self.capture.fps or 30))
+                deadline += 1.0 / self.capture.fps
+                now = time.monotonic()
+                if deadline < now:
+                    deadline = now
+                await asyncio.sleep(max(0, deadline - now))
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self.recorder.error = str(exc)
+            log.error("Grabación: %s", exc)
+        finally:
+            self.recorder.stop()
 
-    def stop_recording(self) -> Optional[str]:
-        """Detiene la grabación."""
-        return self.recorder.stop()
+    async def stop_recording(self) -> Optional[str]:
+        async with self._lifecycle_lock:
+            return await self._stop_recording()
 
     @property
     def status(self) -> dict:
@@ -676,8 +725,8 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Test de capturadora USB")
     parser.add_argument("--device", type=int, default=0)
-    parser.add_argument("--width",  type=int, default=1280)
-    parser.add_argument("--height", type=int, default=720)
+    parser.add_argument("--width",  type=int, default=720)
+    parser.add_argument("--height", type=int, default=480)
     args = parser.parse_args()
 
     print("=" * 60)
@@ -726,7 +775,7 @@ if __name__ == "__main__":
 
         cv2.putText(frame, f"FPS: {fps:.1f}", (10, 30),
                     cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-        cv2.putText(frame, f"Res: {args.width}x{args.height}", (10, 70),
+        cv2.putText(frame, f"Res: {frame.shape[1]}x{frame.shape[0]}", (10, 70),
                     cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
         cv2.imshow("FPV Capture Test", frame)
 

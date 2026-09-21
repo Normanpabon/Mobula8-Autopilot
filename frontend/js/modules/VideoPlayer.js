@@ -42,6 +42,8 @@ export class VideoPlayer {
         this._peerId      = null;
         this._state       = 'idle'; // idle | connecting | connected | error | stopped
         this._recording   = false;
+        this._capture = null;
+        this._recorder = null;
         this._reconnectT  = null;
         this._reconnects  = 0;
 
@@ -67,7 +69,13 @@ export class VideoPlayer {
     /** Estado actual del servidor (capture + recording + webrtc) */
     async getServerStatus() {
         const r = await fetch(this._opts.statusUrl);
-        return r.json();
+        if (!r.ok) throw new Error('No se pudo consultar el estado de video');
+        const data = await r.json();
+        this._capture = data.capture ?? null;
+        this._recorder = data.recorder ?? null;
+        this._recording = Boolean(data.recorder?.recording);
+        this._setState(this._state);
+        return data;
     }
 
     /**
@@ -88,9 +96,9 @@ export class VideoPlayer {
                 headers: { 'Content-Type': 'application/json' },
                 body:    JSON.stringify({
                     device_id: captureOptions.device_id ?? 0,
-                    width:     captureOptions.width     ?? 1280,
-                    height:    captureOptions.height    ?? 720,
-                    fps:       captureOptions.fps       ?? 30,
+                    width:     captureOptions.width     ?? 720,
+                    height:    captureOptions.height    ?? 480,
+                    fps:       captureOptions.fps       ?? (30000 / 1001),
                 }),
             });
 
@@ -98,6 +106,8 @@ export class VideoPlayer {
                 const err = await startResp.json();
                 throw new Error(err.error || 'Error iniciando captura');
             }
+
+            this._capture = await startResp.json();
 
             // 2. Crear conexión WebRTC y obtener stream
             await this._createPeerConnection();
@@ -120,6 +130,9 @@ export class VideoPlayer {
             await fetch(this._opts.stopUrl, { method: 'POST' });
         } catch (_) {}
 
+        this._recording = false;
+        this._capture = null;
+        this._recorder = null;
         this._setState('idle');
     }
 
@@ -127,6 +140,7 @@ export class VideoPlayer {
     async startRecording() {
         const r    = await fetch(this._opts.recStartUrl, { method: 'POST' });
         const data = await r.json();
+        if (!r.ok || !data.recording) throw new Error(data.error || 'No se pudo iniciar la grabación');
         if (data.recording) {
             this._recording = true;
             this._setState(this._state); // refresh callbacks
@@ -138,8 +152,10 @@ export class VideoPlayer {
     async stopRecording() {
         const r    = await fetch(this._opts.recStopUrl, { method: 'POST' });
         const data = await r.json();
+        if (!r.ok) throw new Error(data.error || 'No se pudo detener la grabación');
         this._recording = false;
         this._setState(this._state);
+        if (data.error) throw new Error(data.error);
         return data;
     }
 
@@ -260,6 +276,6 @@ export class VideoPlayer {
 
     _setState(state) {
         this._state = state;
-        this._opts.onStateChange({ state, recording: this._recording });
+        this._opts.onStateChange({ state, recording: this._recording, capture: this._capture, recorder: this._recorder });
     }
 }

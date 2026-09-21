@@ -4,7 +4,13 @@ Sistema de telemetría en tiempo real, video FPV por WebRTC, visión por
 computadora (segmentación + YOLO) e inyección de comandos RC para Mobula8
 con RadioMaster TX12 y protocolo ELRS.
 
-Versión actual: **2.7.0** — ver `CHANGELOG.md`.
+Versión actual: **2.7.1** — ver `CHANGELOG.md`.
+
+La revisión inicial de Debian 13 encontró un MP4 vacío. La versión 2.7.1
+corrige el formato usado por captura/grabación y añade presets NTSC y estado
+real en la interfaz. Verificación con video sintético completada; validación
+con gafas/capturadora reales pendiente. El control RC sigue sin validación
+física y conserva los bloqueos descritos en la revisión.
 
 | Documento | Contenido |
 |-----------|-----------|
@@ -13,6 +19,8 @@ Versión actual: **2.7.0** — ver `CHANGELOG.md`.
 | `docs/VISION_PIPELINE.md` | Pipeline de visión: cascada segmentación + YOLO, latencias y política del governor |
 | `docs/YOLO_FINETUNING.md` | Guía de fine-tuning: reducir tamaño y latencia del modelo |
 | `docs/RC_INJECTION.md` | Inyección de comandos RC (Fase 3): diseño, deadman y validación de protocolo |
+| `docs/PLAN_ACCION.md` | Pendientes priorizados, dependencias y criterios de cierre para video y control Linux |
+| `docs/REVISION_DEBIAN13.md` | Revisión del 2026-09-21: evidencia de video vacío, diagnóstico NTSC y plan de pruebas Linux/video/control |
 | `docs/HARDWARE_VALIDATION.md` | Checklist de validación manual con hardware real |
 | `docs/ROADMAP.md` | Trabajo futuro y fases pendientes |
 | `docs/AGENT_HANDOFF.md` | Reglas de mantenimiento de la documentación |
@@ -37,7 +45,7 @@ accesible desde cualquier dispositivo en la red local.
   La inferencia corre desacoplada del stream (el video no pierde FPS) y el
   overlay muestra detecciones, latencia por etapa y la velocidad máxima
   recomendada que calcula el `LatencyGovernor`
-- **Grabación MP4** sincronizada con el `session_id` de telemetría (frame
+- **Grabación MP4** asociada al `session_id` de telemetría (frame
   limpio, sin overlay — apta para post-proceso y para datasets de fine-tuning)
 - **Inyección de comandos RC (Fase 3)**: frames CRSF RC Channels hacia la
   TX12 por el mismo USB, con deadman switch (>500 ms sin comandos →
@@ -50,7 +58,7 @@ accesible desde cualquier dispositivo en la red local.
 
 ### Stack técnico
 - **Backend**: Python 3.11 / FastAPI (lifespan) / WebSocket / pySerial
-- **Video**: OpenCV (captura MSMF/DSHOW) + aiortc (WebRTC) + PyAV
+- **Video**: OpenCV (captura Windows MSMF/DSHOW; Linux V4L2/CAP_ANY) + aiortc (WebRTC) + PyAV
 - **Visión**: ultralytics YOLOv8 — detección + segmentación (opcional)
 - **Frontend**: Vanilla JavaScript (sin dependencias npm)
 - **Protocolo**: CRSF sobre USB Serial (EdgeTX Telem Mirror, sync byte `0xEA`)
@@ -87,7 +95,9 @@ frontend/                    ← UI web (vanilla JS, sin build)
         ├── VideoPlayer.js        ← Cliente WebRTC (señalización + reconexión)
         └── Utils.js
 docs/                        ← ARCHITECTURE, SETUP, VISION_PIPELINE,
-                               YOLO_FINETUNING, ROADMAP, AGENT_HANDOFF
+                               YOLO_FINETUNING, ROADMAP, AGENT_HANDOFF,
+                               REVISION_DEBIAN13, PLAN_ACCION
+├── tests/                   ← Regresiones de video/API y cliente JS
 models/                      ← Modelos .pt/.onnx propios (se crea automático)
 logs/
 ├── session_YYYYMMDD_HHMMSS.json ← Sesiones guardadas
@@ -144,8 +154,9 @@ python -m serial.tools.list_ports
 
 **Linux:**
 ```bash
-ls /dev/ttyUSB*
-# Normalmente /dev/ttyUSB0
+python -m serial.tools.list_ports -v
+ls -l /dev/serial/by-id/
+# Puede aparecer como ttyACM* o ttyUSB*; usar la ruta real detectada.
 ```
 
 ### 4. Ejecutar el servidor
@@ -157,11 +168,11 @@ python backend/elrs_backend.py --port COM6 --baud 115200
 Salida esperada:
 ```
 [VIDEO] Módulo de video cargado correctamente
-ELRS Telemetry Server v2.7.0 | COM6@115200 | http://localhost:8080
+ELRS Telemetry Server v2.7.1 | COM6@115200 | http://localhost:8080
 [SESSION] Nueva sesión: 20260711_180000
 [SESSION] Logs en: A:\...\logs
 [SERIAL] Conectado a COM6 @ 115200 baud
-[SERVER] ELRS Telemetry Server v2.7.0 listo
+[SERVER] ELRS Telemetry Server v2.7.1 listo
 ```
 
 Si faltan las dependencias de video, el servidor arranca igual con el módulo
@@ -192,9 +203,28 @@ http://192.168.X.X:8080
 
 ## 📹 Video FPV y calibración
 
+El preset inicial es **NTSC 720×480 a 29.97 FPS**, adecuado como punto de
+partida para la salida AV de las Cobra X. Selecciona el dispositivo real;
+si el driver negocia otro modo, la UI muestra la resolución recibida y el
+aviso correspondiente. Los FPS nominales del driver se muestran separados
+de los FPS medidos. También hay presets 640×480, PAL y HD (solo para
+capturadoras que lo admitan). Pedir HD no añade detalle a la señal analógica.
+
+El selector **Vista 4:3 / Vista 16:9 / Píxeles originales** ajusta la
+presentación sin recortar ni alterar las dimensiones capturadas/grabadas.
+Comprueba la proporción de tu cámara; 4:3 es el valor inicial. El preset de
+captura solicita tamaño/cadencia, pero no cambia por sí solo el estándar
+analógico del driver V4L2.
+
+Cada toma usa un nombre único `video_{session_id}_{toma}.mp4` (AVI si el
+encoder MP4 no abre). La UI muestra errores y la ruta del archivo al cerrar;
+no hay descarga desde navegador. Stop Stream y cierre normal del servidor
+finalizan el writer. Cambiar dispositivo/formato durante grabación se
+rechaza. El ID asocia la toma a telemetría, sin timestamps por frame.
+
 En la UI: seleccionar dispositivo y resolución en la barra de controles del
 player, **▶ Start** para iniciar el stream, **⏺ Record** para grabar MP4
-sincronizado con la sesión. El botón **⚙** abre el panel de ajustes de imagen
+asociado a la sesión. El botón **⚙** abre el panel de ajustes de imagen
 (brightness/contrast/saturation/gamma) y el botón **AI** el panel de visión.
 
 Para calibrar la imagen fuera del servidor (ventana OpenCV con histograma):
@@ -258,8 +288,11 @@ Seguridad integrada:
 ⚠ **Pendiente de validación de protocolo**: no está confirmado que EdgeTX
 acepte CRSF entrante por USB en modo Telem Mirror. Plan de pruebas en
 `docs/HARDWARE_VALIDATION.md` §4b y diseño completo en
-`docs/RC_INJECTION.md`. Hasta validar el deadman con hardware real, no
-habilitar la inyección con el drone armado y con hélices.
+`docs/RC_INJECTION.md`. La revisión de Debian 13 detectó que desconectar
+el gamepad conserva el
+último throttle y continúa enviándolo: el deadman no cubre ese caso.
+Hasta corregir y validar estos fallos, las pruebas deben ser de banco,
+con el drone desarmado y sin hélices.
 
 ---
 
@@ -347,9 +380,9 @@ Cada sesión guardada en `logs/session_YYYYMMDD_HHMMSS.json`:
 | `GET` | `/api/video/status` | Estado del stream, grabación y visión |
 | `GET` | `/api/video/config` | Configuración de imagen actual |
 | `POST` | `/api/video/config` | Actualiza `backend/video_config.json` y aplica al vuelo |
-| `POST` | `/api/video/start` | Iniciar captura (`device_id`, `width`, `height`, `fps`) |
+| `POST` | `/api/video/start` | Solicitar captura (FPS decimales); devuelve formato real, pedido y advertencias |
 | `POST` | `/api/video/stop` | Detener captura |
-| `POST` | `/api/video/recording/start` | Grabar MP4 sincronizado con la sesión |
+| `POST` | `/api/video/recording/start` | Grabar MP4 asociado a la sesión |
 | `POST` | `/api/video/recording/stop` | Detener grabación |
 | `POST` | `/offer` | Señalización WebRTC (SDP offer → answer) |
 
@@ -384,6 +417,18 @@ Cada sesión guardada en `logs/session_YYYYMMDD_HHMMSS.json`:
 | `F2` | Toggle performance monitor (FPS, latencia, update rate) |
 
 ---
+
+## Pruebas de software
+
+```bash
+python -m pip install -r requirements-test.txt
+python -m unittest discover -s tests -v
+node tests/test_video_player.mjs
+```
+
+Las pruebas usan imágenes sintéticas, API ASGI y escritura/decodificación
+OpenCV real; no requieren radio ni capturadora. La aceptación con hardware
+se describe en `docs/PLAN_ACCION.md`.
 
 ## 🛠️ Troubleshooting
 
@@ -432,6 +477,15 @@ python -m serial.tools.list_ports
   máximo es un ciclo de inferencia (visible en el HUD). Si molesta, reducir
   la latencia del modelo: `imgsz` 416/320, apagar la segmentación, o un
   modelo optimizado (`docs/YOLO_FINETUNING.md`).
+
+### Existe un MP4 pero no se reproduce
+- Comprobar `ffprobe -v error -show_streams -show_format ARCHIVO.mp4`.
+  La prueba inicial de Debian 13 dejó 258 bytes sin pistas; ese archivo
+  antiguo no se recupera con el cambio de código.
+- Desde 2.7.1 el writer recibe la geometría real y se cierra al detener
+  captura/servidor. Las nuevas tomas no sobrescriben las anteriores.
+- Revisar el error visible y validar un archivo nuevo con el procedimiento
+  de `docs/PLAN_ACCION.md`. Un contador de frames no acredita persistencia.
 
 ### La inyección RC no mueve nada en la TX12
 - Es la incógnita de protocolo abierta de Fase 3: EdgeTX podría no aceptar
@@ -483,12 +537,16 @@ python -m serial.tools.list_ports
 │   ├── YOLO_FINETUNING.md   ← Guía de fine-tuning (tamaño y latencia)
 │   ├── RC_INJECTION.md      ← Inyección RC: diseño, deadman, protocolo
 │   ├── HARDWARE_VALIDATION.md ← Checklist de validación con hardware real
+│   ├── REVISION_DEBIAN13.md  ← Diagnóstico inicial Linux/NTSC/RC
+│   ├── PLAN_ACCION.md        ← Estado de pendientes y criterios de cierre
 │   ├── ROADMAP.md           ← Trabajo futuro (no mezclar con este README)
 │   └── AGENT_HANDOFF.md     ← Reglas de mantenimiento de la documentación
 ├── models/                  ← Modelos YOLO .pt/.onnx (se crea automático, fuera de git)
 ├── logs/                    ← Sesiones guardadas (se crea automático, fuera de git)
 │   ├── session_*.json
 │   └── video/               ← Grabaciones MP4
+├── tests/                   ← Regresiones de captura, grabación, API y cliente JS
+├── requirements-test.txt    ← Dependencias de pruebas (incluye core)
 ├── requirements.txt         ← Dependencias core
 ├── requirements-yolo.txt    ← Dependencias opcionales de visión
 ├── .gitignore

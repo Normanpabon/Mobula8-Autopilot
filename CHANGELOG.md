@@ -1,6 +1,43 @@
 > Las fases pendientes (Fase 3 — inyección EdgeTX, Fase 4 — vuelo autónomo)
 > y el resto del trabajo futuro viven ahora en `docs/ROADMAP.md`.
 
+## [2.7.1] — 2026-09-21
+
+### Corregido
+
+- Captura: dimensiones desde el frame real y FPS del driver, con fallback
+  válido, advertencia de negociación y FPS efectivos medidos. V4L2
+  preferente en Linux y calentamiento al abrir fuera del event loop.
+- Preset NTSC 720×480/29.97 coherente entre API/UI; FPS decimales y
+  validación de parámetros. Configuración guardada ahora indica NTSC.
+- Writer con formato real, errores de encoder propagados, cierre en
+  stop/shutdown, nombres únicos, tarea única y rechazo de cambios de
+  formato durante grabación. Reconexión idéntica no reinicia la captura.
+- Interfaz: formato real, FPS nominales/medidos, proporción 4:3/16:9/nativa,
+  estado de grabación del servidor y ruta del archivo cerrado.
+
+### Añadido
+
+- `docs/PLAN_ACCION.md`: pendientes priorizados con etapas y aceptación.
+- `tests/test_video.py` y `tests/test_video_player.mjs`: 10 pruebas Python
+  y 3 pruebas JS. Writer/decoder OpenCV y track aiortc con frames sintéticos.
+- `requirements-test.txt`: httpx para pruebas ASGI, sin dependencias nuevas
+  de runtime. Ensayo WebRTC en navegador y MP4 sintético de 720×480,
+  1451 frames/48.415 s, decodificado completamente con FFmpeg sin errores.
+  Falta aceptación con capturadora/Cobra X reales.
+
+### Revisión previa — 2026-09-21
+
+- Revisión de Debian 13: MP4 de 258 bytes sin pistas, desajuste entre
+  resolución solicitada y real, configuración PAL frente a fuente NTSC,
+  fallos de cierre/repetición de grabaciones y pérdida de gamepad.
+- Plan de pruebas reproducibles de captura, grabación, telemetría y control
+  de banco en `docs/REVISION_DEBIAN13.md`, con criterios de aceptación.
+- Corrección del plan B de RC: USB joystick es radio → PC; no una entrada
+  de consignas hacia EdgeTX. Documentadas limitaciones del deadman actual.
+- El diagnóstico inicial no modificó código; las correcciones de software
+  se implementaron después en esta versión. No se validó hardware real.
+
 ## [2.7.0] — 2026-07-11
 
 ### Añadido — Fase 3: Inyección de comandos RC

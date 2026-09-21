@@ -2,7 +2,7 @@
 
 Resumen arquitectónico del sistema para que un desarrollador nuevo pueda
 incorporarse al proyecto sin más contexto que este documento, `SETUP.md`
-(instalación) y el `README.md` (uso). Última actualización: v2.7.0.
+(instalación) y el `README.md` (uso). Última actualización: v2.7.1.
 
 ---
 
@@ -76,7 +76,7 @@ el stream**: el track WebRTC solo dibuja el último resultado publicado.
 |--------|-----------------|--------------|
 | `elrs_backend.py` | **Punto de entrada.** Servidor FastAPI: parseo CRSF, WebSocket de telemetría, ~25 endpoints REST, servido del frontend. Carga el módulo de video de forma opcional (si falla, solo se desactiva el video). | `parse_crsf_frame()`, `crc8_dvb_s2()` (tabla precomputada), `ConnectionManager` (broadcast WS), `serial_reader_task()`, patrón `lifespan` |
 | `session_manager.py` | Persistencia de sesiones de vuelo. Acumula frames en memoria y al cerrar calcula el resumen (voltajes, RSSI, LQ, actitud) y guarda JSON en `logs/`. | `SessionManager`, `save()`, `_compute_summary()` |
-| `video_streamer.py` | Pipeline completo de video: enumeración de capturadoras, captura OpenCV, correcciones de imagen, track WebRTC y grabación MP4. Conecta el `VisionPipeline` al ciclo de vida de la captura. | `DeviceManager` (enumeración paralela MSMF→DSHOW, nombres via `Win32_PnPEntity`), `VideoCapture`, `apply_white_balance()`, `FPVVideoTrack` (recibe un `frame_getter` async — desacoplado de la fuente), `WebRTCManager` (un `RTCPeerConnection` por cliente), `VideoRecorder`, `VideoStreamer` (fachada; `.yolo` es alias del detector para compatibilidad) |
+| `video_streamer.py` | Pipeline completo de video: enumeración de capturadoras, captura OpenCV, correcciones de imagen, track WebRTC y grabación MP4. Conecta el `VisionPipeline` al ciclo de vida de la captura. | `DeviceManager` (enumeración paralela; Windows MSMF→DSHOW, Linux V4L2→CAP_ANY; nombres PnP/sysfs), `VideoCapture`, `apply_white_balance()`, `FPVVideoTrack` (recibe un `frame_getter` async — desacoplado de la fuente), `WebRTCManager` (un `RTCPeerConnection` por cliente), `VideoRecorder`, `VideoStreamer` (fachada; `.yolo` es alias del detector para compatibilidad) |
 | `vision_pipeline.py` | Orquestador de la cascada de visión: loop de inferencia desacoplado del stream (ThreadPoolExecutor de 1 worker), overlay barato (`annotate()`, solo cv2), y política de latencia para el futuro autopilot. Ver `docs/VISION_PIPELINE.md`. | `VisionPipeline`, `VisionResult`, `LatencyGovernor` (v_max = distancia de seguridad / latencia total; modos off/warming_up/active/stale) |
 | `yolo_processor.py` | Etapa de detección: wrapper síncrono del modelo YOLO (`.pt`/`.onnx`/`.engine`), `imgsz` configurable. Falla silenciosamente si `ultralytics` no está instalado. | `YOLOProcessor`, `infer()` (devuelve detecciones con bbox en píxeles), `list_local_models()` (excluye `-seg`) |
 | `segmentation_processor.py` | Etapa opcional de segmentación previa a la detección: máscara binaria de regiones con objetos, dilatada con margen. `focus_mode="mask"` suprime el fondo antes del detector; `"overlay"` solo dibuja. | `SegmentationProcessor`, `segment()`, `apply_focus()`, `list_local_models()` (solo `-seg`) |
@@ -116,7 +116,7 @@ directamente por FastAPI. Decisión tomada en v2.0.0 al eliminar React
 | **pydantic** | Modelos de request (`VideoStartRequest`, `YOLOConfigRequest`) — el body parsing de FastAPI depende de esto. |
 | **pyserial** | Lectura del puerto COM donde la TX12 refleja la telemetría CRSF. |
 | **numpy** | Manipulación de frames como arrays (balance de blancos por canal, clipping). |
-| **opencv-python** | Captura de video USB (backends MSMF/DSHOW), correcciones de imagen, escritura MP4, ventana de calibración. |
+| **opencv-python** | Captura de video USB (backends MSMF/DSHOW en Windows y V4L2/CAP_ANY en Linux), correcciones de imagen, escritura MP4, ventana de calibración. |
 | **aiortc** | WebRTC en Python: `RTCPeerConnection`, negociación SDP, codificación del stream hacia el navegador. |
 | **av** (PyAV) | `VideoFrame`: puente entre los arrays numpy de OpenCV y los frames que aiortc transmite. |
 
@@ -205,3 +205,27 @@ como señal lenta, o mover la inferencia a GPU/edge.
    (incluida la regla cero: partir siempre de este repo, nunca de copias).
 5. El trabajo pendiente priorizado está en `ROADMAP.md`; el historial de
    decisiones, en `CHANGELOG.md`.
+
+
+## Captura y persistencia — v2.7.1
+
+El formato solicitado (por defecto 720×480, 30000/1001 FPS) se conserva
+separado del formato real. `VideoCapture` obtiene dimensiones del array,
+FPS nominales del driver (fallback explícito si inválidos) y mide FPS de
+lectura. El servidor devuelve estos valores a la UI y al `WebRTCManager`.
+La apertura/calibración/primeras lecturas se ejecutan fuera del event loop.
+Un read bloqueado aún no tiene timeout duro; stop espera su finalización
+antes de liberar el dispositivo.
+
+`VideoStreamer` serializa operaciones de ciclo de vida con un lock y posee
+una sola tarea de grabación. `VideoRecorder` verifica apertura de MP4/AVI,
+valida geometría y usa un identificador de toma único. El cierre normal
+del servidor detiene captura y finaliza el writer. No se agregan dependencias
+de runtime. `tests/test_video.py` usa unittest, httpx (solo pruebas), frames
+sintéticos y OpenCV real para verificar la ruta de persistencia.
+
+El navegador ajusta 4:3/16:9/píxeles originales mediante presentación CSS;
+no modifica los frames ni la entrada a visión. El reloj de grabación y
+los mensajes de error se actualizan desde el estado del backend. La toma
+conserva el ID de sesión en su nombre; sincronía por timestamp, manifiestos
+y descarga siguen pendientes en `PLAN_ACCION.md`.

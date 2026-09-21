@@ -1,5 +1,5 @@
 """
-ELRS Backend WebSocket Server v2.7.0
+ELRS Backend WebSocket Server v2.7.1
 """
 import asyncio, json, argparse
 from contextlib import asynccontextmanager
@@ -14,7 +14,7 @@ import serial
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request as FRequest
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 import uvicorn
 
 from session_manager import SessionManager
@@ -103,14 +103,17 @@ async def lifespan(app: FastAPI):
     args, _ = parser.parse_known_args()
     asyncio.create_task(serial_reader_task(args.port, args.baud))
     injector.start()
-    print("[SERVER] ELRS Telemetry Server v2.7.0 listo")
-    yield
-    # Shutdown
-    await injector.stop()
-    if session and session.current_frame_count > 0:
-        print("[SERVER] Guardando sesión..."); session.save()
+    print("[SERVER] ELRS Telemetry Server v2.7.1 listo")
+    try:
+        yield
+    finally:
+        await injector.stop()
+        if video:
+            await video.stop_capture()
+        if session and session.current_frame_count > 0:
+            print("[SERVER] Guardando sesión..."); session.save()
 
-app = FastAPI(title="ELRS Telemetry Server", version="2.7.0", lifespan=lifespan)
+app = FastAPI(title="ELRS Telemetry Server", version="2.7.1", lifespan=lifespan)
 manager = ConnectionManager()
 session: Optional[SessionManager] = None
 telemetry_history = deque(maxlen=500)
@@ -159,9 +162,9 @@ except Exception as e:
 # ──────────────────────────────────────────────────────────────
 class VideoStartRequest(BaseModel):
     device_id: int   = 0
-    width:     int   = 1280
-    height:    int   = 720
-    fps:       int   = 30
+    width:     int   = Field(default=720, gt=0, le=4096)
+    height:    int   = Field(default=480, gt=0, le=2160)
+    fps:       float = Field(default=30000 / 1001, gt=0, le=240, allow_inf_nan=False)
 
 class VideoConfigRequest(BaseModel):
     brightness: int   = 0
@@ -361,11 +364,13 @@ async def update_video_config(req: VideoConfigRequest):
 async def start_video(req: VideoStartRequest):
     if not VIDEO_AVAILABLE or not video:
         return JSONResponse({"error": "Módulo de video no disponible"}, status_code=503)
-    ok = await video.start_capture(req.device_id, req.width, req.height, req.fps)
+    try:
+        ok = await video.start_capture(req.device_id, req.width, req.height, req.fps)
+    except RuntimeError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=409)
     if not ok:
         return JSONResponse({"error": f"No se pudo abrir dispositivo {req.device_id}"}, status_code=500)
-    return JSONResponse({"started": True, "device_id": req.device_id,
-                         "width": req.width, "height": req.height, "fps": req.fps})
+    return JSONResponse({"started": True, **video.capture.status})
 
 @app.post("/api/video/stop")
 async def stop_video():
@@ -381,15 +386,18 @@ async def start_recording():
     if not video.capture.is_running:
         return JSONResponse({"error": "Captura no iniciada"}, status_code=400)
     sid = session.session_id if session else datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    path = video.start_recording(sid)
-    return JSONResponse({"recording": True, "session_id": sid, "path": path})
+    try:
+        path = await video.start_recording(sid)
+    except RuntimeError as exc:
+        return JSONResponse({"error": str(exc), "recording": False}, status_code=500)
+    return JSONResponse({"recording": True, "session_id": video.recorder.status["session_id"], "path": path})
 
 @app.post("/api/video/recording/stop")
 async def stop_recording():
     if not VIDEO_AVAILABLE or not video:
         return JSONResponse({"error": "Módulo de video no disponible"}, status_code=503)
-    path = video.stop_recording()
-    return JSONResponse({"recording": False, "saved": path})
+    path = await video.stop_recording()
+    return JSONResponse({"recording": False, "saved": path, "error": video.recorder.error})
 
 # ──────────────────────────────────────────────────────────────
 # Vision routes (pipeline: segmentación + detección YOLO + governor)
@@ -591,15 +599,15 @@ if frontend_path.exists():
         return FileResponse(index) if index.exists() else JSONResponse({"error": "Not found"}, 404)
 else:
     @app.get("/")
-    async def root(): return JSONResponse({"message": "ELRS v2.7.0", "error": "frontend/ not found"})
+    async def root(): return JSONResponse({"message": "ELRS v2.7.1", "error": "frontend/ not found"})
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="ELRS Telemetry Server v2.7.0")
+    parser = argparse.ArgumentParser(description="ELRS Telemetry Server v2.7.1")
     parser.add_argument("--port", default="COM6")
     parser.add_argument("--baud", type=int, default=115200)
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--web-port", type=int, default=8080)
     args = parser.parse_args()
-    print(f"ELRS Telemetry Server v2.7.0 | {args.port}@{args.baud} | http://localhost:{args.web_port}")
+    print(f"ELRS Telemetry Server v2.7.1 | {args.port}@{args.baud} | http://localhost:{args.web_port}")
     uvicorn.run(app, host=args.host, port=args.web_port, log_level="warning")

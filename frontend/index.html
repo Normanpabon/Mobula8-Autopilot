@@ -28,10 +28,11 @@
             background: linear-gradient(transparent, rgba(0,0,0,.85));
             flex-wrap: wrap;
         }
-        .vc-group { display: flex; align-items: center; gap: 6px; }
+        .vc-group { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; max-width: 100%; }
         .vc-status-group { margin-left: auto; }
 
         .vc-select {
+            max-width: 100%;
             background: rgba(255,255,255,.07);
             border: 1px solid #1e2535;
             color: var(--text-primary);
@@ -266,8 +267,14 @@
         <!-- Center Panel: FPV Video (WebRTC) -->
         <section class="center-panel" id="centerPanel">
             <!-- Video element -->
-            <video id="fpvVideo" autoplay playsinline muted
-                   style="width:100%;height:100%;object-fit:contain;background:#000;display:none;"></video>
+            <div id="videoSurface" style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:#000;">
+                <video id="fpvVideo" autoplay playsinline muted
+                       style="object-fit:fill;background:#000;display:none;"></video>
+            </div>
+            <div style="position:absolute;top:10px;left:10px;right:10px;z-index:2;pointer-events:none;color:#e2e8f0;font-size:12px;text-shadow:0 1px 3px #000;">
+                <div id="videoFormat" aria-live="polite">Captura: sin iniciar</div>
+                <div id="videoNotice" role="status" style="color:#fbbf24;overflow-wrap:anywhere;"></div>
+            </div>
 
             <!-- Overlay cuando no hay stream -->
             <div class="video-placeholder" id="videoPlaceholder">
@@ -413,9 +420,16 @@
                         <option value="0">Device 0</option>
                     </select>
                     <select id="resSelect" class="vc-select" title="Resolution">
-                        <option value="1280x720">720p</option>
-                        <option value="1920x1080">1080p</option>
-                        <option value="640x480">480p</option>
+                        <option value="720x480" data-fps="29.97002997002997">NTSC · 720×480 · 29.97</option>
+                        <option value="640x480" data-fps="29.97002997002997">NTSC · 640×480 · 29.97</option>
+                        <option value="720x576" data-fps="25">PAL · 720×576 · 25</option>
+                        <option value="1280x720" data-fps="30">HD · 1280×720 · 30 (si admite)</option>
+                        <option value="1920x1080" data-fps="30">HD · 1920×1080 · 30 (si admite)</option>
+                    </select>
+                    <select id="videoAspect" class="vc-select" title="Proporción de la cámara; solo cambia la visualización">
+                        <option value="4:3">Vista 4:3</option>
+                        <option value="16:9">Vista 16:9</option>
+                        <option value="native">Píxeles originales</option>
                     </select>
                 </div>
 
@@ -471,8 +485,6 @@
 
         // ── State ──────────────────────────────────
         let player      = null;
-        let recInterval = null;
-        let recSeconds  = 0;
         let streaming   = false;
 
         // ── Init ───────────────────────────────────
@@ -480,11 +492,37 @@
             const videoEl = document.getElementById('fpvVideo');
             player = new VideoPlayer(videoEl, {
                 onStateChange: updateVideoUI,
-                onError:       (msg) => console.error('[VideoPlayer]', msg),
+                onError: (msg) => {
+                    console.error('[VideoPlayer]', msg);
+                    document.getElementById('videoNotice').textContent = msg;
+                },
             });
 
+            document.getElementById('videoAspect').addEventListener('change', applyVideoAspect);
+            videoEl.addEventListener('resize', applyVideoAspect);
+            new ResizeObserver(applyVideoAspect).observe(document.getElementById('videoSurface'));
+            let polling = false;
+            setInterval(async () => {
+                if (!player.connected || polling) return;
+                polling = true;
+                try { await player.getServerStatus(); }
+                catch (err) { document.getElementById('videoNotice').textContent = err.message; }
+                finally { polling = false; }
+            }, 1000);
             await loadDevices();
             await loadCurrentConfig();
+        }
+
+        function applyVideoAspect() {
+            const video = document.getElementById('fpvVideo');
+            const surface = document.getElementById('videoSurface');
+            const mode = document.getElementById('videoAspect').value;
+            const ratio = mode === 'native'
+                ? ((video.videoWidth || 720) / (video.videoHeight || 480))
+                : (mode === '16:9' ? 16 / 9 : 4 / 3);
+            const width = Math.min(surface.clientWidth, surface.clientHeight * ratio);
+            video.style.width = `${width}px`;
+            video.style.height = `${width / ratio}px`;
         }
 
         async function loadDevices() {
@@ -789,34 +827,40 @@
                 const [w, h] = document.getElementById('resSelect').value.split('x').map(Number);
                 const device = parseInt(document.getElementById('deviceSelect').value);
                 streaming = true;
-                await player.connect({ device_id: device, width: w, height: h, fps: 30 });
+                const fps = Number(document.getElementById('resSelect').selectedOptions[0].dataset.fps);
+                document.getElementById('videoNotice').textContent = '';
+                await player.connect({ device_id: device, width: w, height: h, fps });
             }
         };
 
         // ── Record toggle ───────────────────────────
         window.recordToggle = async function () {
             if (!player || !streaming) return;
-
-            if (player.recording) {
-                await player.stopRecording();
-                clearInterval(recInterval);
-                recInterval = null;
-                document.getElementById('recTimer').style.display = 'none';
-            } else {
-                await player.startRecording();
-                recSeconds  = 0;
-                recInterval = setInterval(() => {
-                    recSeconds++;
-                    const m = String(Math.floor(recSeconds / 60)).padStart(2, '0');
-                    const s = String(recSeconds % 60).padStart(2, '0');
-                    document.getElementById('recTimer').textContent = `⏺ ${m}:${s}`;
-                }, 1000);
-                document.getElementById('recTimer').style.display = '';
+            try {
+                if (player.recording) await player.stopRecording();
+                else await player.startRecording();
+                await player.getServerStatus();
+            } catch (err) {
+                document.getElementById('videoNotice').textContent = err.message;
             }
         };
 
         // ── Update UI ───────────────────────────────
-        function updateVideoUI({ state, recording }) {
+        function updateVideoUI({ state, recording, capture, recorder }) {
+            const format = document.getElementById('videoFormat');
+            format.textContent = capture
+                ? `Captura ${capture.width}×${capture.height} · ${Number(capture.fps).toFixed(2)} FPS nominales · ${Number(capture.measured_fps || 0).toFixed(1)} FPS medidos`
+                : 'Captura: sin iniciar';
+            const notice = capture?.error || recorder?.error || capture?.format_warning || '';
+            const saved = !recording && recorder?.output_path
+                ? `Archivo cerrado: ${recorder.output_path}` : '';
+            document.getElementById('videoNotice').textContent = [notice, saved].filter(Boolean).join(' · ');
+            const timer = document.getElementById('recTimer');
+            timer.style.display = recording ? '' : 'none';
+            timer.textContent = `⏺ ${Math.floor(recorder?.duration_s || 0)} s`;
+            document.getElementById('resSelect').disabled = recording || state === 'connecting';
+            document.getElementById('deviceSelect').disabled = recording || state === 'connecting';
+            applyVideoAspect();
             // FIX v2.4.1: sincronizar el flag `streaming` con el estado real.
             // Antes, tras un error, `streaming` quedaba en true y el botón
             // "Retry" ejecutaba disconnect() en lugar de reconectar.

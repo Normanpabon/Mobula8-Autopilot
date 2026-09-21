@@ -1,0 +1,2 @@
+-r requirements.txt
+httpx>=0.28.0  # Cliente ASGI para regresiones de la API sin servidor ni radio.

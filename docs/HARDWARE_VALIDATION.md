@@ -1,4 +1,11 @@
-# Validación con Hardware Real — v2.5.0
+# Validación con Hardware Real — checklist histórico v2.5.0
+
+> Actualización 2026-09-21: hubo una prueba de video parcialmente exitosa
+> en Debian 13 según el usuario. El archivo conservado está vacío. Usar
+> primero [`REVISION_DEBIAN13.md`](REVISION_DEBIAN13.md), que documenta los
+> fallos de grabación y control, corrige el plan B de USB joystick y aporta
+> comandos Linux y criterios de aceptación. Las casillas de este checklist
+> histórico expresan objetivos; no implican funcionalidad comprobada.
 
 Checklist de pruebas manuales para cerrar el ítem bloqueante del
 `ROADMAP.md`: *"Validar en runtime las correcciones de v2.4.1/v2.5.0 con
@@ -125,10 +132,12 @@ drone SIN hélices. Nunca con hélices hasta validar el deadman en runtime.**
       `sync_byte`: `0xEE` (default), `0xEA`, `0xC8`.
 - [ ] **Registrar el resultado en `RC_INJECTION.md` §3**: qué dirección
       acepta EdgeTX en modo Telem Mirror, o que ninguna funciona (→ activar
-      plan B: Joystick USB HID / módulo ELRS externo).
+      plan B: adaptador trainer compatible / interfaz para módulo ELRS
+      externo; USB joystick no inyecta PC → radio).
 - [ ] Si acepta: verificar el deadman en runtime — mover un slider, cerrar
-      la pestaña del navegador, confirmar en la TX12 que en ≤500 ms los
-      canales caen a failsafe (throttle mínimo).
+      la pestaña del navegador, medir que tras el timeout de 500 ms más
+      periodo de envío y jitter los canales caen a failsafe. Repetir los
+      casos de pérdida de gamepad/USB/proceso del plan Debian 13.
 - [ ] Verificar que la telemetría sigue fluyendo con la inyección activa
       (lectura y escritura comparten el puerto serial — mirar
       `frames_received` en `/api/status` mientras se inyecta).

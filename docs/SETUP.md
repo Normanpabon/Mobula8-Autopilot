@@ -3,7 +3,9 @@
 ## Requisitos previos
 
 - [Miniconda](https://docs.anaconda.com/miniconda/) o [Miniforge](https://github.com/conda-forge/miniforge/releases) instalado.
-- Windows 10/11 (el proyecto usa DirectShow para captura de video).
+- Windows 10/11 o Linux. En Debian 13 la última prueba de video fue parcial;
+  seguir también [`REVISION_DEBIAN13.md`](REVISION_DEBIAN13.md) para V4L2,
+  permisos de dispositivos y validación de grabación/control.
 - Python **3.11** recomendado — versión más estable para todas las dependencias (aiortc, torch, ultralytics).
 
 > **Nota:** El proyecto fue desarrollado con Python 3.13. Si ya tienes 3.13 y no vas a usar YOLO, puedes usarlo sin problemas. Para YOLO con GPU, quédate con 3.11.

@@ -4,5 +4,5 @@
   "saturation": 128,
   "gamma": 0.9,
   "hist_eq": false,
-  "ntsc": false
+  "ntsc": true
 }

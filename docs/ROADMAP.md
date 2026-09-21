@@ -5,18 +5,36 @@ de `README.md`. El README describe el sistema **tal como funciona hoy**; este
 archivo describe **hacia dónde va**. Ver `AGENT_HANDOFF.md` para las reglas
 de cómo mantener ambos documentos.
 
-Última actualización: 2026-07-11 (tras v2.7.0 — Fase 3: inyección de
-comandos RC con deadman switch, endpoints `/api/rc/*` + `WS /ws/rc` y panel
-de control manual con gamepad; ver `RC_INJECTION.md`).
+Última actualización: 2026-09-21, v2.7.1. La lista operativa con orden,
+estado y criterios de cierre está en [`PLAN_ACCION.md`](PLAN_ACCION.md).
+[`REVISION_DEBIAN13.md`](REVISION_DEBIAN13.md) conserva el diagnóstico
+inicial anterior a las correcciones de captura/grabación.
 
 ---
 
 ## 🔴 Bloqueante — antes de cualquier otra cosa
 
+- [x] **P0 formato/encoder (software):** geometría real, FPS negociados y
+      errores del writer corregidos en 2.7.1; prueba física pendiente.
+      El MP4 vacío previo se conserva como evidencia.
+- [x] **P0 ciclo de vida (software):** cierre en shutdown, tarea única y
+      nombres únicos en 2.7.1. Writer y decoder reales probados con frames
+      sintéticos; falta la matriz de pruebas físicas de PLAN_ACCION.
+- [x] **Preset NTSC/UI:** 720×480/29.97, FPS decimales, formato real,
+      FPS medidos y proporción visual seleccionable en 2.7.1.
+- [ ] **P1 Linux/NTSC:** completar inventario V4L2, rutas estables,
+      selección del estándar si procede, timeout de driver y reconexión.
+- [ ] **P0 antes de RC físico:** neutralizar pérdida de gamepad/foco,
+      exigir throttle bajo, impedir reactivación de consignas antiguas tras
+      timeout y corregir desconexión/reconexión serial.
+- [ ] **Transporte RC:** identificar entrada realmente soportada por la
+      TX12/firmware; Telem Mirror no acredita entrada RC y USB joystick es
+      radio → PC. No declarar control validado hasta observar canales en FC.
+
 - [ ] **Validar en runtime** las correcciones de v2.4.1/v2.5.0 con hardware real
-      (TX12 + Mobula8 + EasyCap conectados). Todo se verificó por importación
-      del backend, `py_compile` y `node --check`, no por ejecución del stream
-      WebRTC real.
+      (TX12 + Mobula8 + capturadora conectados). Hay una prueba parcial de
+      video reportada en Debian 13; falta registrar evidencia y aprobar
+      grabación, recuperación y control con el plan de revisión.
 - [x] ~~Mover `VideoPlayer.js` a `frontend-vanilla/js/modules/`~~ — resuelto
       en v2.4.1 (2026-07-10). El archivo de la raíz (que además traía el fix
       de reconexión) se absorbió en `frontend-vanilla/js/modules/VideoPlayer.js`.
@@ -63,12 +81,13 @@ de control manual con gamepad; ver `RC_INJECTION.md`).
 - [x] ~~Panel de control manual en la UI (sliders throttle/pitch/roll/yaw +
       Web Gamepad API)~~ — v2.7.0: panel RC con envío continuo a 10 Hz por
       WS y gamepad Mode 2.
-- [ ] **Pendiente de validación de protocolo** (el único ítem que exige
-      hardware): confirmar si la TX12 acepta CRSF de entrada desde la PC en
-      modo serial — plan de pruebas en `HARDWARE_VALIDATION.md` §7, con las
-      tres direcciones (`0xEE`/`0xEA`/`0xC8`) configurables por API. Plan B
-      si no acepta: modo Joystick USB HID de EdgeTX o módulo ELRS externo
-      en la bahía JR (`RC_INJECTION.md` §3).
+- [ ] **Pendiente de validación de protocolo y seguridad**: confirmar si la
+      TX12 acepta CRSF de entrada desde la PC en
+      modo serial — plan de pruebas en `HARDWARE_VALIDATION.md` §4b, con las
+      tres direcciones (`0xEE`/`0xEA`/`0xC8`) configurables por API. Si no acepta,
+      evaluar una entrada trainer soportada con adaptador o una
+      interfaz CRSF para módulo ELRS externo (`RC_INJECTION.md` §3).
+      USB joystick no ofrece entrada PC → radio.
 - [ ] GPS y visualización de trayectoria en mapa (requiere módulo GPS,
       el Mobula8 no trae uno de fábrica)
 - [ ] Compresión de logs JSON (gzip) — los archivos de sesión crecen sin
