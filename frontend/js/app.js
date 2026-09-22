@@ -12,6 +12,11 @@ let ws = null;
 let telemetry = null;
 let horizon = null;
 let reconnectTimeout = null;
+let serialConnected = false;
+window.addEventListener('serial-status', ({ detail }) => {
+    serialConnected = detail.connected;
+    updateConnectionStatus(ws?.readyState === WebSocket.OPEN && serialConnected ? 'connected' : 'disconnected');
+});
 
 // ─── DOM Elements ───
 const elements = {
@@ -67,7 +72,7 @@ function connectWebSocket() {
 
 function handleWebSocketOpen() {
     console.log('[WS] Connected');
-    updateConnectionStatus('connected');
+    updateConnectionStatus(serialConnected ? 'connected' : 'disconnected');
     addLog('WebSocket connected', 'success');
     
     // Clear reconnect timeout

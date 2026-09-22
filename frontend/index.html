@@ -156,7 +156,7 @@
         }
     </style>
 </head>
-<body>
+<body class="telemetry-page">
     <!-- Header -->
     <header class="app-header">
         <div class="header-left">
@@ -174,6 +174,19 @@
             <div class="flight-mode" id="flightMode">DISARMED</div>
         </div>
     </header>
+
+    <section class="serial-controls" aria-label="Conexión del control">
+        <label for="serialPort">Puerto del control</label>
+        <select id="serialPort" class="vc-select"><option value="">Buscando puertos…</option></select>
+        <label for="serialBaud">Baudios</label>
+        <input id="serialBaud" class="vc-select" type="number" min="300" max="4000000" value="115200">
+        <button id="serialRefresh" class="vc-btn">Actualizar puertos</button>
+        <button id="serialConnect" class="vc-btn vc-btn-primary">Conectar / cambiar</button>
+        <button id="serialDisconnect" class="vc-btn vc-btn-danger">Desconectar</button>
+        <span id="serialStatus" role="status" aria-live="polite">Sin conexión serial</span>
+        <span id="serialError" role="alert"></span>
+    </section>
+    <script type="module" src="js/modules/SerialControls.js"></script>
 
     <!-- Main Grid -->
     <main class="main-grid">
@@ -419,17 +432,18 @@
                     <select id="deviceSelect" class="vc-select" title="Capture device">
                         <option value="0">Device 0</option>
                     </select>
-                    <select id="resSelect" class="vc-select" title="Resolution">
-                        <option value="720x480" data-fps="29.97002997002997">NTSC · 720×480 · 29.97</option>
-                        <option value="640x480" data-fps="29.97002997002997">NTSC · 640×480 · 29.97</option>
-                        <option value="720x576" data-fps="25">PAL · 720×576 · 25</option>
-                        <option value="1280x720" data-fps="30">HD · 1280×720 · 30 (si admite)</option>
-                        <option value="1920x1080" data-fps="30">HD · 1920×1080 · 30 (si admite)</option>
+                    <select id="videoProfile" class="vc-select" title="Tipo de entrada">
+                        <option value="digital">Digital · adaptable hasta 1080p</option>
+                        <option value="analog">Analógico · NTSC / PAL</option>
+                    </select>
+                    <select id="analogStandard" class="vc-select" title="Estándar analógico" hidden>
+                        <option value="ntsc">NTSC · 720×480 · 29.97 FPS</option>
+                        <option value="pal">PAL · 720×576 · 25 FPS</option>
                     </select>
                     <select id="videoAspect" class="vc-select" title="Proporción de la cámara; solo cambia la visualización">
                         <option value="4:3">Vista 4:3</option>
                         <option value="16:9">Vista 16:9</option>
-                        <option value="native">Píxeles originales</option>
+                        <option value="native" selected>Proporción nativa</option>
                     </select>
                 </div>
 
@@ -482,6 +496,7 @@
     <script type="module" src="js/app.js"></script>
     <script type="module">
         import { VideoPlayer } from './js/modules/VideoPlayer.js';
+        import { captureOptions, defaultAspect } from './js/modules/VideoPresets.js';
 
         // ── State ──────────────────────────────────
         let player      = null;
@@ -498,6 +513,17 @@
                 },
             });
 
+            document.getElementById('videoProfile').addEventListener('change', async () => {
+                applyProfile();
+                await loadCurrentConfig();
+                if (streaming) await player.connect(selectedCaptureOptions());
+            });
+            for (const id of ['deviceSelect', 'analogStandard']) {
+                document.getElementById(id).addEventListener('change', async () => {
+                    if (streaming) await player.connect(selectedCaptureOptions());
+                });
+            }
+            applyProfile();
             document.getElementById('videoAspect').addEventListener('change', applyVideoAspect);
             videoEl.addEventListener('resize', applyVideoAspect);
             new ResizeObserver(applyVideoAspect).observe(document.getElementById('videoSurface'));
@@ -513,12 +539,29 @@
             await loadCurrentConfig();
         }
 
+        function selectedCaptureOptions() {
+            return captureOptions(document.getElementById('deviceSelect').value,
+                document.getElementById('videoProfile').value,
+                document.getElementById('analogStandard').value);
+        }
+
+        function applyProfile() {
+            const profile = document.getElementById('videoProfile').value;
+            document.getElementById('analogStandard').hidden = profile !== 'analog';
+            document.getElementById('videoAspect').value = defaultAspect(profile);
+            for (const id of ['vsBrightness', 'vsContrast', 'vsSaturation']) {
+                document.getElementById(id).disabled = profile === 'digital';
+                document.getElementById(id).title = profile === 'digital' ? 'Digital conserva el color del dispositivo' : '';
+            }
+            applyVideoAspect();
+        }
+
         function applyVideoAspect() {
             const video = document.getElementById('fpvVideo');
             const surface = document.getElementById('videoSurface');
             const mode = document.getElementById('videoAspect').value;
             const ratio = mode === 'native'
-                ? ((video.videoWidth || 720) / (video.videoHeight || 480))
+                ? ((video.videoWidth || 1920) / (video.videoHeight || 1080))
                 : (mode === '16:9' ? 16 / 9 : 4 / 3);
             const width = Math.min(surface.clientWidth, surface.clientHeight * ratio);
             video.style.width = `${width}px`;
@@ -529,9 +572,10 @@
             try {
                 const devices = await player.getDevices();
                 const sel     = document.getElementById('deviceSelect');
-                sel.innerHTML = devices.length > 0
-                    ? devices.map(d => `<option value="${d.id}">${d.name} (${d.width}x${d.height})</option>`).join('')
-                    : '<option value="0">Device 0 (default)</option>';
+                const previous = sel.value;
+                sel.replaceChildren(...(devices.length ? devices.map(d =>
+                    new Option(`${d.name} · puerto ${d.id}`, d.id)) : [new Option('Device 0 (default)', '0')]));
+                if (devices.some(d => String(d.id) === previous)) sel.value = previous;
             } catch (_) {
                 // Backend sin módulo de video o sin iniciar
             }
@@ -655,6 +699,7 @@
         // corta a failsafe si el navegador muere o se pierde la conexión.
         let rcEnabled   = false;
         let rcWs        = null;
+        let rcEpoch     = null;
         let rcSendTimer = null;
         let rcPollTimer = null;
 
@@ -703,9 +748,36 @@
             };
         }
 
+        function rcFullChannels(ch) {
+            const full = Object.fromEntries(Array.from({length: 16}, (_, i) => [String(i + 1), 988]));
+            Object.assign(full, {'1': ch.roll, '2': ch.pitch, '3': ch.throttle, '4': ch.yaw});
+            return full;
+        }
+
         function rcConnectWs() {
-            rcWs = new WebSocket(`ws://${location.host}/ws/rc`);
-            rcWs.onclose = () => { rcWs = null; };
+            rcEpoch = null;
+            const socket = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws/rc`);
+            rcWs = socket;
+            socket.onopen = () => socket.send(JSON.stringify({action: 'acquire',
+                channels: rcFullChannels({roll: 1500, pitch: 1500, throttle: 988, yaw: 1500})}));
+            socket.onmessage = event => {
+                const message = JSON.parse(event.data);
+                if (message.epoch) rcEpoch = message.epoch;
+                if (!message.ok) {
+                    rcEpoch = null;
+                    clearInterval(rcSendTimer);
+                    rcSetSliders([1500, 1500, 988, 1500]);
+                    document.getElementById('rcFsBadge').textContent = 'REACTIVAR RC';
+                }
+            };
+            socket.onclose = () => {
+                if (rcWs !== socket) return;
+                rcWs = null;
+                rcEpoch = null;
+                clearInterval(rcSendTimer);
+                rcSetSliders([1500, 1500, 988, 1500]);
+                document.getElementById('rcFsBadge').textContent = 'REACTIVAR RC';
+            };
         }
 
         window.rcToggle = async function () {
@@ -727,10 +799,9 @@
                 rcConnectWs();
                 rcSendTimer = setInterval(() => {
                     if (!rcWs || rcWs.readyState !== WebSocket.OPEN) {
-                        if (!rcWs) rcConnectWs();
                         return;
                     }
-                    rcWs.send(JSON.stringify({ channels: rcReadChannels() }));
+                    if (rcEpoch) rcWs.send(JSON.stringify({ epoch: rcEpoch, channels: rcFullChannels(rcReadChannels()) }));
                 }, 100);
                 rcPollTimer = setInterval(pollRcStatus, 1000);
             } else {
@@ -753,6 +824,16 @@
                 const s = await r.json();
                 document.getElementById('rcFrames').textContent = s.frames_sent ?? 0;
                 const badge = document.getElementById('rcFsBadge');
+                if (!s.enabled && rcEnabled) {
+                    rcEnabled = false;
+                    clearInterval(rcSendTimer); rcSendTimer = null;
+                    clearInterval(rcPollTimer); rcPollTimer = null;
+                    if (rcWs) { rcWs.close(); rcWs = null; }
+                    const btn = document.getElementById('btnRcToggle');
+                    btn.textContent = '▶ Enable RC';
+                    btn.classList.remove('active');
+                    rcSetSliders([1500, 1500, 988, 1500]);
+                }
                 if (!s.enabled)             { badge.textContent = 'OFF';      badge.className = 'rc-fs-badge'; }
                 else if (s.failsafe_active) { badge.textContent = 'FAILSAFE'; badge.className = 'rc-fs-badge failsafe'; }
                 else                        { badge.textContent = 'LIVE';     badge.className = 'rc-fs-badge live'; }
@@ -765,6 +846,7 @@
         window.addEventListener('gamepaddisconnected', () => {
             document.getElementById('rcGamepadName').textContent = 'no detectado';
             document.getElementById('rcGamepad').checked = false;
+            window.rcCenter();
         });
 
         window.vsUpdateValue = function (el, valId) {
@@ -786,7 +868,9 @@
                 await fetch('/api/video/config', {
                     method:  'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body:    JSON.stringify({ brightness, contrast, saturation, gamma }),
+                    body:    JSON.stringify({ profile: document.getElementById('videoProfile').value, gamma,
+                        ...(document.getElementById('videoProfile').value === 'analog'
+                            ? {brightness, contrast, saturation} : {}), }),
                 });
             } catch (e) {
                 console.error('[VideoSettings]', e);
@@ -795,7 +879,7 @@
 
         async function loadCurrentConfig() {
             try {
-                const r = await fetch('/api/video/config');
+                const r = await fetch(`/api/video/config?profile=${document.getElementById('videoProfile').value}`);
                 if (!r.ok) return;
                 const cfg = await r.json();
                 const setSlider = (id, valId, val) => {
@@ -824,12 +908,9 @@
                 document.getElementById('videoPlaceholder').style.display = '';
             } else {
                 // Iniciar
-                const [w, h] = document.getElementById('resSelect').value.split('x').map(Number);
-                const device = parseInt(document.getElementById('deviceSelect').value);
                 streaming = true;
-                const fps = Number(document.getElementById('resSelect').selectedOptions[0].dataset.fps);
                 document.getElementById('videoNotice').textContent = '';
-                await player.connect({ device_id: device, width: w, height: h, fps });
+                await player.connect(selectedCaptureOptions());
             }
         };
 
@@ -849,7 +930,7 @@
         function updateVideoUI({ state, recording, capture, recorder }) {
             const format = document.getElementById('videoFormat');
             format.textContent = capture
-                ? `Captura ${capture.width}×${capture.height} · ${Number(capture.fps).toFixed(2)} FPS nominales · ${Number(capture.measured_fps || 0).toFixed(1)} FPS medidos`
+                ? `Captura ${capture.width}×${capture.height} · ${Number(capture.fps).toFixed(2)} FPS nominales · ${Number(capture.measured_fps || 0).toFixed(1)} FPS medidos · Navegador ${document.getElementById('fpvVideo').videoWidth || "—"}×${document.getElementById('fpvVideo').videoHeight || "—"}`
                 : 'Captura: sin iniciar';
             const notice = capture?.error || recorder?.error || capture?.format_warning || '';
             const saved = !recording && recorder?.output_path
@@ -858,7 +939,8 @@
             const timer = document.getElementById('recTimer');
             timer.style.display = recording ? '' : 'none';
             timer.textContent = `⏺ ${Math.floor(recorder?.duration_s || 0)} s`;
-            document.getElementById('resSelect').disabled = recording || state === 'connecting';
+            document.getElementById('videoProfile').disabled = recording || state === 'connecting';
+            document.getElementById('analogStandard').disabled = recording || state === 'connecting';
             document.getElementById('deviceSelect').disabled = recording || state === 'connecting';
             applyVideoAspect();
             // FIX v2.4.1: sincronizar el flag `streaming` con el estado real.

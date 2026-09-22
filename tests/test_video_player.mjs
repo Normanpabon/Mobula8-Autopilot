@@ -4,7 +4,7 @@ import { readFile } from 'node:fs/promises';
 const source = await readFile(new URL('../frontend/js/modules/VideoPlayer.js', import.meta.url), 'utf8');
 const { VideoPlayer } = await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
 
-test('NTSC request and negotiated capture reach UI callback', async () => {
+test('digital request lets backend negotiate instead of forcing NTSC', async () => {
     let request, state;
     const player = new VideoPlayer({}, { onStateChange: value => { state = value; } });
     player._createPeerConnection = async () => player._setState('connected');
@@ -15,9 +15,10 @@ test('NTSC request and negotiated capture reach UI callback', async () => {
     };
     try {
         await player.connect();
-        assert.equal(request.width, 720);
-        assert.equal(request.height, 480);
-        assert.equal(request.fps, 30000 / 1001);
+        assert.equal(request.profile, 'digital');
+        assert.equal(request.width, undefined);
+        assert.equal(request.height, undefined);
+        assert.equal(request.fps, undefined);
         assert.equal(state.capture.width, 640);
     } finally { globalThis.fetch = original; }
 });
@@ -46,4 +47,29 @@ test('server-side recording failure clears UI recording state', async () => {
         assert.equal(player.recording, false);
         assert.equal(state.recorder.error, 'No frames');
     } finally { globalThis.fetch = original; }
+});
+
+test('analog PAL preset and explicit overrides survive client serialization', async () => {
+    let request;
+    const player = new VideoPlayer({});
+    player._createPeerConnection = async () => {};
+    const original = globalThis.fetch;
+    globalThis.fetch = async (_, options) => {
+        request = JSON.parse(options.body);
+        return {ok:true, json:async () => ({})};
+    };
+    try {
+        await player.connect({device_id: 2, profile:'analog', standard:'pal'});
+        assert.deepEqual(request, {device_id:2, profile:'analog', standard:'pal'});
+        await player.connect({profile:'digital', width:1280, height:720, fps:60});
+        assert.equal(request.width, 1280);
+        assert.equal(request.fps, 60);
+    } finally { globalThis.fetch = original; }
+});
+const presetsSource = await readFile(new URL('../frontend/js/modules/VideoPresets.js', import.meta.url), 'utf8');
+const presets = await import(`data:text/javascript;base64,${Buffer.from(presetsSource).toString('base64')}`);
+test('switching camera preserves preset intent and correct display aspect', () => {
+    assert.deepEqual(presets.captureOptions('3', 'digital'), {device_id:3, profile:'digital', standard:'ntsc'});
+    assert.equal(presets.defaultAspect('digital'), 'native');
+    assert.equal(presets.defaultAspect('analog'), '4:3');
 });

@@ -80,7 +80,7 @@ export class VideoPlayer {
 
     /**
      * Inicia la captura en el servidor y luego conecta WebRTC.
-     * @param {object} captureOptions - { device_id, width, height, fps }
+     * @param {object} captureOptions - { device_id, profile, standard, width?, height?, fps? }
      */
     async connect(captureOptions = {}) {
         // FIX: cancelar reconexión pendiente antes de conectar
@@ -96,9 +96,11 @@ export class VideoPlayer {
                 headers: { 'Content-Type': 'application/json' },
                 body:    JSON.stringify({
                     device_id: captureOptions.device_id ?? 0,
-                    width:     captureOptions.width     ?? 720,
-                    height:    captureOptions.height    ?? 480,
-                    fps:       captureOptions.fps       ?? (30000 / 1001),
+                    profile:   captureOptions.profile ?? 'digital',
+                    standard:  captureOptions.standard ?? 'ntsc',
+                    ...(captureOptions.width != null ? {width: captureOptions.width} : {}),
+                    ...(captureOptions.height != null ? {height: captureOptions.height} : {}),
+                    ...(captureOptions.fps != null ? {fps: captureOptions.fps} : {}),
                 }),
             });
 

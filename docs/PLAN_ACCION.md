@@ -19,7 +19,7 @@ y resolver la entrada RC hacia la TX12 antes de cualquier prueba de vuelo.
 | 2 · P0 | Grabación: encoder, cierre, tomas distintas | Implementado; prueba física pendiente | Tomas de 10 s, 60 s y 5 min decodificables; duración ±5%; reinicios sin sobrescritura. |
 | 3 · P1 | Diagnóstico NTSC, color, entrelazado y latencia | Pendiente | Referencia V4L2/FFmpeg y navegador comparadas; señal estable y latencia medida. |
 | 4 · P1 | Robustez USB/Linux | Pendiente | Pérdida/reconexión y driver bloqueado gestionados sin congelar servicio. |
-| 5 · P0 antes de RC | Corregir pérdida de mando y serial | Pendiente | Ningún comando viejo revive tras timeout, desconexión o cambio de fuente. |
+| 5 · P0 antes de RC | Corregir pérdida de mando y serial | Implementado en software; banco pendiente | Ningún comando viejo revive tras timeout, desconexión o cambio de fuente. |
 | 6 · P0 antes de RC | Confirmar transporte de entrada RC | Pendiente | Canales comandados observables en Receiver de Betaflight, no solo contador de bytes. |
 | 7 · P1 | Prueba integrada con visión y grabación | Pendiente | FPS, duración y latencias documentados bajo carga; fallos seguros verificados. |
 
@@ -118,15 +118,17 @@ basta (el MP4 vacío original también lo devolvía). No hay captura de audio.
 
 ## Etapa 4 — Preparar el control (bloquea pruebas físicas de inyección)
 
-- [ ] Al perder gamepad/foco/WS, neutralizar consignas y exigir recuperación
-      explícita con throttle bajo. El código RC actual conserva valores.
-- [ ] Evitar que un comando parcial después del deadman reactive throttle
+- [x] Al perder gamepad/WS, neutralizar consignas y exigir recuperación
+      explícita con throttle bajo.
+- [ ] Definir y probar la política de pérdida de foco del navegador.
+- [x] Evitar que un comando parcial después del deadman reactive throttle
       o AUX anteriores. Center debe tener prioridad sobre la lectura gamepad.
-- [ ] Calibrar ejes/mapeo, seleccionar dispositivo y exigir un único dueño
-      del canal de mando. El stick centrado de un gamepad no es throttle bajo.
-- [ ] Usar reloj monotónico y escritura serial acotada; limpiar connected y
-      reabrir el puerto tras desconexión. Mostrar canales enviados, no solo
-      consignas almacenadas.
+- [x] Exigir un único propietario y época del canal de mando.
+- [ ] Calibrar ejes/mapeo y seleccionar gamepad. El stick centrado de un gamepad no es throttle bajo.
+- [x] Usar reloj monotónico y escritura serial acotada; limpiar connected y
+      reabrir el puerto tras desconexión.
+- [ ] Distinguir en UI consignas y último frame escrito, sin confundirlo
+      con confirmación física de canales en el receptor.
 - [ ] Validar telemetría real con puerto `/dev/serial/by-id/…`, CRC y valores
       plausibles durante 5 min, guardando JSON. No basta abrir el puerto.
 
@@ -166,3 +168,46 @@ Resultado de esta entrega: 10 pruebas Python y 3 JS aprobadas. Se verificó
 WebRTC en navegador con fuente sintética rotulada y se grabó un MP4 de
 720×480/29.97 FPS, 1451 frames, 48.415 s y 3 986 552 bytes; FFmpeg lo
 decodificó completo sin errores. No es evidencia de calidad RF/NTSC real.
+
+## Actualización serial y RC — 2026-09-22
+
+- Selector de puerto/baudios en frontend, enumeración según SO: COM en
+  Windows; dispositivos enumerados bajo /dev en Linux, prefiriendo by-id.
+- Un único SerialManager controla lectura/escritura, cierre, errores,
+  write_timeout de 50 ms y reintentos exponenciales de 0,5 a 10 s.
+  Estados: DISCONNECTED, CONNECTING, CONNECTED, ERROR, RETRY_WAIT.
+  POST /api/serial/connect devuelve 202 si la apertura falla y queda en
+  reintento; Desconectar cancela los reintentos. Cambiar de dispositivo
+  requiere seleccionarlo expresamente; no se elige otra radio al azar.
+- La reconexión restaura telemetría, pero deja RC deshabilitado. Los
+  comandos RC usan propietario/época, estado completo y reloj monotónico.
+  Un timeout o pérdida del propietario invalida las consignas antiguas.
+- Regresiones: tests/test_serial.py y tests/test_rc.py, sin hardware.
+
+### Pendientes que esta entrega no cierra
+
+La captura de video sigue usando un thread: aislarla en un proceso con
+watchdog y terminación/reinicio continúa pendiente. No se garantiza cierre
+acotado si cap.read() queda bloqueado en el driver.
+
+El primer bloque de aceptación física sigue siendo Cobra X/EasyCap:
+grabaciones de 10 s, 60 s y 5 min, ffprobe y decodificación ffmpeg de cada
+archivo, FPS nominales/reales, 4:3/16:9, extracción USB durante una toma y
+latencia EasyCap → WebRTC → navegador. No se han ejecutado estas pruebas.
+
+Antes del autopilot, identificar y validar una interfaz soportada
+PC → EdgeTX → mixer → ELRS → receptor: primero TX12 sola; después Mobula8
+sin hélices y desarmado, observando Receiver en Betaflight. frames_sent
+solo cuenta escrituras aceptadas por el serial; no acredita recepción ni
+movimiento de canales en el FC. No se añaden variantes de direcciones CRSF.
+
+## Presets adaptativos — 2026-09-22
+
+La captura ahora separa Analógico (NTSC/PAL) y Digital (negociación hasta
+1080p, predeterminado). Se elimina la imposición global de NTSC, aspecto
+4:3 y calibración de EasyCap a las webcams. Se mantiene la geometría real
+hacia WebRTC y grabación. Ver [VIDEO_PRESETS.md](VIDEO_PRESETS.md) para el
+diagnóstico, el contrato API y la matriz de aceptación física pendiente.
+Validado con cámaras sintéticas, fallback a 720p, rechazo de MJPEG,
+NTSC/PAL, track 1080p y archivo 1080p decodificado. No demuestra la calidad
+óptica, USB o WebRTC del hardware del usuario.

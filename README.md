@@ -20,6 +20,7 @@ física y conserva los bloqueos descritos en la revisión.
 | `docs/YOLO_FINETUNING.md` | Guía de fine-tuning: reducir tamaño y latencia del modelo |
 | `docs/RC_INJECTION.md` | Inyección de comandos RC (Fase 3): diseño, deadman y validación de protocolo |
 | `docs/PLAN_ACCION.md` | Pendientes priorizados, dependencias y criterios de cierre para video y control Linux |
+| `docs/PLAN_MVP_1_2_SEMANAS.md` | Plan de desarrollo y criterios de terminado para cerrar el MVP en 1–2 semanas |
 | `docs/REVISION_DEBIAN13.md` | Revisión del 2026-09-21: evidencia de video vacío, diagnóstico NTSC y plan de pruebas Linux/video/control |
 | `docs/HARDWARE_VALIDATION.md` | Checklist de validación manual con hardware real |
 | `docs/ROADMAP.md` | Trabajo futuro y fases pendientes |
@@ -161,6 +162,13 @@ ls -l /dev/serial/by-id/
 
 ### 4. Ejecutar el servidor
 
+Puedes arrancar sin `--port` y seleccionar **Puerto del control** en el
+frontend. **Actualizar puertos** enumera los dispositivos, **Conectar /
+cambiar** cambia la radio sin reiniciar y **Desconectar** cancela también
+los reintentos. Windows usa COM; Linux prefiere `/dev/serial/by-id` cuando
+está disponible. Una reconexión automática recupera telemetría, dejando RC
+deshabilitado hasta habilitarlo expresamente.
+
 ```bash
 python backend/elrs_backend.py --port COM6 --baud 115200
 ```
@@ -203,18 +211,17 @@ http://192.168.X.X:8080
 
 ## 📹 Video FPV y calibración
 
-El preset inicial es **NTSC 720×480 a 29.97 FPS**, adecuado como punto de
-partida para la salida AV de las Cobra X. Selecciona el dispositivo real;
-si el driver negocia otro modo, la UI muestra la resolución recibida y el
-aviso correspondiente. Los FPS nominales del driver se muestran separados
-de los FPS medidos. También hay presets 640×480, PAL y HD (solo para
-capturadoras que lo admitan). Pedir HD no añade detalle a la señal analógica.
+Hay dos presets: **Digital · adaptable hasta 1080p** (predeterminado, para
+webcam/capturadora HD) y **Analógico · NTSC / PAL** (720×480/29.97 o
+720×576/25, para Cobra X/EasyCap). Digital negocia modos de captura y
+conserva el mejor formato recibido hasta 1080p; no hereda la calibración
+analógica. Si el dispositivo entrega otro modo, la UI lo muestra junto
+con los FPS nominales, medidos y las dimensiones recibidas en el navegador.
 
-El selector **Vista 4:3 / Vista 16:9 / Píxeles originales** ajusta la
+El selector **Vista 4:3 / Vista 16:9 / Proporción nativa** ajusta la
 presentación sin recortar ni alterar las dimensiones capturadas/grabadas.
-Comprueba la proporción de tu cámara; 4:3 es el valor inicial. El preset de
-captura solicita tamaño/cadencia, pero no cambia por sí solo el estándar
-analógico del driver V4L2.
+Analógico arranca en 4:3; Digital usa la proporción del frame real. Solicitar
+NTSC/PAL no cambia por sí solo el estándar analógico del driver V4L2.
 
 Cada toma usa un nombre único `video_{session_id}_{toma}.mp4` (AVI si el
 encoder MP4 no abre). La UI muestra errores y la ruta del archivo al cerrar;
@@ -222,7 +229,7 @@ no hay descarga desde navegador. Stop Stream y cierre normal del servidor
 finalizan el writer. Cambiar dispositivo/formato durante grabación se
 rechaza. El ID asocia la toma a telemetría, sin timestamps por frame.
 
-En la UI: seleccionar dispositivo y resolución en la barra de controles del
+En la UI: seleccionar dispositivo y preset en la barra de controles del
 player, **▶ Start** para iniciar el stream, **⏺ Record** para grabar MP4
 asociado a la sesión. El botón **⚙** abre el panel de ajustes de imagen
 (brightness/contrast/saturation/gamma) y el botón **AI** el panel de visión.
@@ -267,6 +274,14 @@ está en `models/`.
 
 ---
 
+## Presets de video
+
+Selecciona **Digital · adaptable hasta 1080p** para webcam o capturadora HD,
+o **Analógico · NTSC / PAL** para EasyCap/Cobra X. Digital negocia el formato
+real sin aplicar la calibración analógica; la vista usa proporción nativa.
+Cambiar puerto/preset reinicia el stream, excepto durante una grabación.
+Ver [diagnóstico, API y validación de presets](docs/VIDEO_PRESETS.md).
+
 ## 🎮 Panel RC (inyección de comandos — Fase 3)
 
 El botón **RC** del player abre el panel de control manual: sliders
@@ -288,11 +303,11 @@ Seguridad integrada:
 ⚠ **Pendiente de validación de protocolo**: no está confirmado que EdgeTX
 acepte CRSF entrante por USB en modo Telem Mirror. Plan de pruebas en
 `docs/HARDWARE_VALIDATION.md` §4b y diseño completo en
-`docs/RC_INJECTION.md`. La revisión de Debian 13 detectó que desconectar
-el gamepad conserva el
-último throttle y continúa enviándolo: el deadman no cubre ese caso.
-Hasta corregir y validar estos fallos, las pruebas deben ser de banco,
-con el drone desarmado y sin hélices.
+`docs/RC_INJECTION.md`. La pérdida de gamepad, del propietario WebSocket o de serial revoca
+el control. Tras un timeout se requiere adquirir una nueva época con los
+16 canales y throttle mínimo; la UI lo hace al volver a habilitar RC.
+El transporte PC → TX12 sigue pendiente de validación de banco, con el
+drone desarmado y sin hélices.
 
 ---
 
@@ -404,7 +419,8 @@ Cada sesión guardada en `logs/session_YYYYMMDD_HHMMSS.json`:
 |--------|----------|-------------|
 | `GET` | `/api/rc/status` | Estado: enabled, deadman/failsafe, canales, frames enviados |
 | `POST` | `/api/rc/config` | `enabled`, `rate_hz`, `deadman_ms`, `sync_byte` (409 sin serial) |
-| `POST` | `/api/rc/channels` | `{"channels": {"throttle": 1600, "1": 1450}}` — alias AETR o índice 1–16, µs |
+| `POST` | `/api/rc/acquire` | Estado completo de 16 canales y throttle=988; devuelve `epoch` |
+| `POST` | `/api/rc/channels` | `epoch` y estado completo de 16 canales; alias AETR o índice 1–16, µs |
 | `POST` | `/api/rc/center` | Todos los canales a failsafe (posición segura) |
 | `WS` | `/ws/rc` | Canal continuo de baja latencia (UI/gamepad, 10 Hz) |
 
@@ -539,6 +555,7 @@ python -m serial.tools.list_ports
 │   ├── HARDWARE_VALIDATION.md ← Checklist de validación con hardware real
 │   ├── REVISION_DEBIAN13.md  ← Diagnóstico inicial Linux/NTSC/RC
 │   ├── PLAN_ACCION.md        ← Estado de pendientes y criterios de cierre
+│   ├── PLAN_MVP_1_2_SEMANAS.md ← Plan de cierre del MVP en 1–2 semanas
 │   ├── ROADMAP.md           ← Trabajo futuro (no mezclar con este README)
 │   └── AGENT_HANDOFF.md     ← Reglas de mantenimiento de la documentación
 ├── models/                  ← Modelos YOLO .pt/.onnx (se crea automático, fuera de git)

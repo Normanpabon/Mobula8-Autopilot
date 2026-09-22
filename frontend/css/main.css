@@ -483,3 +483,14 @@ body {
         height: calc(100vh - 120px);
     }
 }
+
+/* Selector serial del servidor (Windows/Linux). */
+.serial-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+    padding: 10px 20px; border-bottom: 1px solid var(--border-color); font-size: 12px; }
+.serial-controls select { max-width: min(360px, 100%); }
+.serial-controls input { width: 100px; }
+#serialError { color: var(--status-error); overflow-wrap: anywhere; }
+
+.telemetry-page { display: flex; flex-direction: column; }
+.telemetry-page > .app-header, .telemetry-page > .serial-controls { flex-shrink: 0; }
+.telemetry-page > .main-grid { flex: 1; min-height: 0; height: auto; }

@@ -92,6 +92,29 @@ def load_video_config() -> dict:
             log.warning(f"[Video] Error leyendo config, usando defaults: {e}")
     return defaults
 
+def profile_config(profile, saved=None):
+    """Legacy calibration belongs to analog capture, never to a webcam."""
+    saved = load_video_config() if saved is None else saved
+    if profile == "analog":
+        return {k: v for k, v in saved.items() if k != "digital"}
+    return {"gamma": 1.0, "hist_eq": False, "wb_r": 1.0, "wb_g": 1.0,
+            "wb_b": 1.0, **saved.get("digital", {})}
+
+
+def capture_request(width=None, height=None, fps=None, profile="digital", standard="ntsc"):
+    if profile not in ("analog", "digital") or standard not in ("ntsc", "pal"):
+        raise ValueError("Preset o estándar de video inválido")
+    if (width is None) != (height is None):
+        raise ValueError("Especifica ancho y alto juntos")
+    adaptive = width is None and profile == "digital"
+    default_size = (1920, 1080) if profile == "digital" else (720, 576 if standard == "pal" else 480)
+    width, height = (width, height) if width is not None else default_size
+    fps = float(fps if fps is not None else (30 if profile == "digital" else 25 if standard == "pal" else NTSC_FPS))
+    if width <= 0 or height <= 0 or not math.isfinite(fps) or fps <= 0:
+        raise ValueError("Resolución y FPS deben ser positivos y finitos")
+    return dict(width=width, height=height, fps=fps, profile=profile, standard=standard, adaptive=adaptive)
+
+
 def apply_white_balance(frame: np.ndarray, wb_r: float, wb_g: float, wb_b: float) -> np.ndarray:
     """Corrección de White Balance multiplicando cada canal RGB."""
     if wb_r == 1.0 and wb_g == 1.0 and wb_b == 1.0:
@@ -180,8 +203,9 @@ class DeviceManager:
             result = {
                 "id":        idx,
                 "name":      name,
-                "width":     int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
-                "height":    int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)),
+                "width":     int(frame.shape[1]),
+                "height":    int(frame.shape[0]),
+                "format_scope": "initial_driver_default",
                 "fps":       cap.get(cv2.CAP_PROP_FPS) or 30,
                 "available": True,
             }
@@ -249,7 +273,11 @@ class VideoCapture:
         self._frame = None
         self._lock = asyncio.Lock()
         self._task = None
-        self._cfg = load_video_config()
+        self.profile = "digital"
+        self.standard = "ntsc"
+        self.negotiation = []
+        self.pixel_format = None
+        self._cfg = profile_config(self.profile)
         self.is_running = False
         self.device_id = 0
         self.width, self.height = 720, 480
@@ -262,22 +290,26 @@ class VideoCapture:
         self.error = None
         self.format_warning = None
 
-    def _open_configured(self, device_id, width, height, fps):
+    def _open_mode(self, device_id, width, height, fps, codec=None):
         """Operaciones del driver fuera del event loop; algunos ignoran set()."""
         cap = _open_capture(device_id)
         try:
             if not cap.isOpened():
                 raise RuntimeError(f"No se pudo abrir dispositivo {device_id}")
-            for prop, value in (
-                (cv2.CAP_PROP_FRAME_WIDTH, width),
-                (cv2.CAP_PROP_FRAME_HEIGHT, height),
-                (cv2.CAP_PROP_FPS, fps),
-                (cv2.CAP_PROP_BUFFERSIZE, 1),
-                (cv2.CAP_PROP_BRIGHTNESS, self._cfg.get("brightness", 0)),
-                (cv2.CAP_PROP_CONTRAST, self._cfg.get("contrast", 32)),
-                (cv2.CAP_PROP_SATURATION, self._cfg.get("saturation", 60)),
-            ):
-                cap.set(prop, value)
+            if codec:
+                cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*codec))
+            if width is not None:
+                cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
+                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+                cap.set(cv2.CAP_PROP_FPS, fps)
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            # A digital device keeps its own exposure/color defaults unless
+            # explicitly calibrated under the digital profile.
+            for key, prop in (("brightness", cv2.CAP_PROP_BRIGHTNESS),
+                              ("contrast", cv2.CAP_PROP_CONTRAST),
+                              ("saturation", cv2.CAP_PROP_SATURATION)):
+                if key in self._cfg:
+                    cap.set(prop, self._cfg[key])
             for _ in range(10):
                 ret, frame = cap.read()
                 if ret and frame is not None and frame.size:
@@ -288,16 +320,51 @@ class VideoCapture:
             cap.release()
             raise
 
-    async def start(self, device_id: int = 0, width: int = 720,
-                    height: int = 480, fps: Optional[float] = None) -> bool:
+    def _open_configured(self, device_id, width, height, fps):
+        self.negotiation = []
+        if not self.requested["adaptive"]:
+            return self._open_mode(device_id, width, height, fps)
+        # Try common HD UVC modes with MJPEG (USB bandwidth) and the driver's
+        # default codec. Inspect actual frames: set() success is not evidence.
+        modes = [(1920, 1080, "MJPG"), (1920, 1080, None),
+                 (1280, 720, "MJPG"), (1280, 720, None), (None, None, None)]
+        best = None
+        for mode in modes:
+            cap = None
+            try:
+                cap, frame, driver_fps = self._open_mode(device_id, *mode[:2], fps, mode[2])
+                h, w = frame.shape[:2]
+                self.negotiation.append({"requested": list(mode), "actual": [w, h], "fps": driver_fps if math.isfinite(driver_fps) else None})
+                if w > 1920 or h > 1080:
+                    continue
+                score = (w * h, min(driver_fps, fps) if math.isfinite(driver_fps) and driver_fps > 0 else 0)
+                if best is None or score > best[0]:
+                    best = (score, mode)
+                if w == 1920 and h == 1080 and math.isfinite(driver_fps) and driver_fps >= fps * 0.9:
+                    result, cap = (cap, frame, driver_fps), None
+                    return result
+                if mode == modes[-1] and best[1] == mode:
+                    result, cap = (cap, frame, driver_fps), None
+                    return result
+            except Exception as exc:
+                self.negotiation.append({"requested": list(mode), "error": str(exc)})
+            finally:
+                if cap is not None:
+                    cap.release()
+        if best is None:
+            raise RuntimeError("No se encontró un formato digital válido hasta 1920×1080")
+        mode = best[1]
+        return self._open_mode(device_id, *mode[:2], fps, mode[2])
+
+    async def start(self, device_id: int = 0, width=None,
+                    height=None, fps=None, profile="digital", standard="ntsc") -> bool:
+        request = capture_request(width, height, fps, profile, standard)
         await self.stop()
-        self._cfg = load_video_config()
-        target_fps = float(fps if fps is not None else
-                           (NTSC_FPS if self._cfg.get("ntsc", True) else 25))
-        if width <= 0 or height <= 0 or not math.isfinite(target_fps) or target_fps <= 0:
-            raise ValueError("Resolución y FPS deben ser positivos y finitos")
+        self.profile, self.standard = profile, standard
+        self._cfg = profile_config(profile)
+        width, height, target_fps = request["width"], request["height"], request["fps"]
         self.device_id = device_id
-        self.requested = {"width": width, "height": height, "fps": target_fps}
+        self.requested = request
         self.error = self.format_warning = None
         self.measured_fps = 0.0
         self.frame_count = 0
@@ -309,6 +376,9 @@ class VideoCapture:
             log.error(self.error)
             return False
         self._cap = cap
+        fourcc_value = cap.get(cv2.CAP_PROP_FOURCC)
+        fourcc = int(fourcc_value) if math.isfinite(fourcc_value) else 0
+        self.pixel_format = ''.join(chr((fourcc >> (8 * i)) & 255) for i in range(4)).strip('\x00') or "driver default"
         self.height, self.width = frame.shape[:2]
         valid_fps = math.isfinite(driver_fps) and 0 < driver_fps <= 240
         self.fps = float(driver_fps) if valid_fps else target_fps
@@ -376,9 +446,11 @@ class VideoCapture:
     def update_config(self, cfg: dict) -> None:
         self._cfg = {**self._cfg, **cfg}
         if self._cap is not None:
-            self._cap.set(cv2.CAP_PROP_BRIGHTNESS, self._cfg.get("brightness", 0))
-            self._cap.set(cv2.CAP_PROP_CONTRAST, self._cfg.get("contrast", 32))
-            self._cap.set(cv2.CAP_PROP_SATURATION, self._cfg.get("saturation", 60))
+            for key, prop in (("brightness", cv2.CAP_PROP_BRIGHTNESS),
+                              ("contrast", cv2.CAP_PROP_CONTRAST),
+                              ("saturation", cv2.CAP_PROP_SATURATION)):
+                if key in cfg:
+                    self._cap.set(prop, cfg[key])
 
     @property
     def status(self) -> dict:
@@ -389,6 +461,8 @@ class VideoCapture:
             "measured_fps": round(self.measured_fps, 2) if self.is_running else 0,
             "frame_count": self.frame_count, "error": self.error,
             "format_warning": self.format_warning,
+            "profile": self.profile, "standard": self.standard,
+            "pixel_format": self.pixel_format, "negotiation": self.negotiation,
         }
 
 
@@ -618,18 +692,17 @@ class VideoStreamer:
         return frame
 
     async def start_capture(self, device_id: int = 0,
-                            width: int = 720, height: int = 480,
-                            fps: Optional[float] = None) -> bool:
+                            width=None, height=None, fps=None,
+                            profile="digital", standard="ntsc") -> bool:
         async with self._lifecycle_lock:
-            requested = self.capture.requested
+            requested = capture_request(width, height, fps, profile, standard)
             if (self.capture.is_running and device_id == self.capture.device_id
-                    and width == requested.get("width") and height == requested.get("height")
-                    and (fps is None or fps == requested.get("fps"))):
+                    and requested == self.capture.requested):
                 return True  # Reconectar un navegador no reinicia captura/grabación.
             if self.recorder.is_recording:
                 raise RuntimeError("Detén la grabación antes de cambiar la captura")
             await self._stop_capture()
-            ok = await self.capture.start(device_id, width, height, fps)
+            ok = await self.capture.start(device_id, width, height, fps, profile, standard)
             if ok:
                 self.webrtc = WebRTCManager(self._get_display_frame,
                     self.capture.width, self.capture.height, self.capture.fps)

@@ -6,19 +6,23 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from collections import deque
-from typing import Optional, List
+from typing import Optional, List, Literal
 import struct
 import time
+import platform
+import re
 
 import serial
+from serial.tools import list_ports
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request as FRequest
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 import uvicorn
 
 from session_manager import SessionManager
 from command_injector import CommandInjector
+from serial_manager import SerialManager
 
 CRSF_SYNC = 0xEA
 
@@ -98,15 +102,20 @@ async def lifespan(app: FastAPI):
     session = SessionManager()
     system_status["current_session_id"] = session.session_id
     parser = argparse.ArgumentParser()
-    parser.add_argument("--port", default="COM6")
+    parser.add_argument("--port", default=None, help="Puerto inicial opcional; seleccionable desde la interfaz")
     parser.add_argument("--baud", type=int, default=115200)
     args, _ = parser.parse_known_args()
-    asyncio.create_task(serial_reader_task(args.port, args.baud))
+    if args.port:
+        try:
+            await connect_serial(SerialConnectRequest(port=args.port, baud=args.baud))
+        except Exception as exc:
+            system_status["serial_error"] = str(exc)
     injector.start()
     print("[SERVER] ELRS Telemetry Server v2.7.1 listo")
     try:
         yield
     finally:
+        await disconnect_serial()
         await injector.stop()
         if video:
             await video.stop_capture()
@@ -117,21 +126,19 @@ app = FastAPI(title="ELRS Telemetry Server", version="2.7.1", lifespan=lifespan)
 manager = ConnectionManager()
 session: Optional[SessionManager] = None
 telemetry_history = deque(maxlen=500)
-system_status = {"serial_port": None, "baud_rate": None, "connected": False,
+system_status = {"serial_port": None, "baud_rate": None, "connected": False, "serial_error": None,
                  "frames_received": 0, "uptime_seconds": 0, "start_time": None,
                  "current_session_id": None, "current_session_frames": 0}
 
-# Handle serial compartido: el reader lo abre, el CommandInjector escribe por él
-serial_conn = {"ser": None}
+injector = CommandInjector(write_fn=lambda frame: serial_manager.write(frame))
+serial_buffer = bytearray()
 
-def _rc_serial_write(frame: bytes) -> bool:
-    ser = serial_conn["ser"]
-    if ser is None or not ser.is_open:
-        return False
-    ser.write(frame)
-    return True
 
-injector = CommandInjector(write_fn=_rc_serial_write)
+def serial_lost():
+    injector.enabled = False
+    injector.reset()
+    serial_buffer.clear()
+
 
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True,
                    allow_methods=["*"], allow_headers=["*"])
@@ -142,7 +149,7 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True,
 #         de frontend bloquee GET /api/video/*)
 # ──────────────────────────────────────────────────────────────
 try:
-    from video_streamer import VideoStreamer, CONFIG_FILE, load_video_config
+    from video_streamer import VideoStreamer, CONFIG_FILE, load_video_config, profile_config
     video = VideoStreamer()
     VIDEO_AVAILABLE = True
     print("[VIDEO] Módulo de video cargado correctamente")
@@ -162,14 +169,23 @@ except Exception as e:
 # ──────────────────────────────────────────────────────────────
 class VideoStartRequest(BaseModel):
     device_id: int   = 0
-    width:     int   = Field(default=720, gt=0, le=4096)
-    height:    int   = Field(default=480, gt=0, le=2160)
-    fps:       float = Field(default=30000 / 1001, gt=0, le=240, allow_inf_nan=False)
+    profile: Literal["analog", "digital"] = "digital"
+    standard: Literal["ntsc", "pal"] = "ntsc"
+    width: Optional[int] = Field(default=None, gt=0, le=1920)
+    height: Optional[int] = Field(default=None, gt=0, le=1080)
+    fps: Optional[float] = Field(default=None, gt=0, le=240, allow_inf_nan=False)
+
+    @model_validator(mode="after")
+    def paired_dimensions(self):
+        if (self.width is None) != (self.height is None):
+            raise ValueError("Especifica ancho y alto juntos")
+        return self
 
 class VideoConfigRequest(BaseModel):
-    brightness: int   = 0
-    contrast:   int   = 32
-    saturation: int   = 60
+    profile: Literal["analog", "digital"] = "analog"
+    brightness: Optional[int] = None
+    contrast: Optional[int] = None
+    saturation: Optional[int] = None
     gamma:      float = 1.0
     hist_eq:    bool  = False
     wb_r:       float = 1.0
@@ -200,44 +216,93 @@ class RCConfigRequest(BaseModel):
     sync_byte:  str   = "0xEE"   # 0xEE módulo TX | 0xEA radio | 0xC8 FC (validación de protocolo)
 
 class RCChannelsRequest(BaseModel):
+    epoch: Optional[str] = None
     channels: dict   # {"1": 1500, ..., "roll"/"pitch"/"throttle"/"yaw": µs}
 
 
 # ──────────────────────────────────────────────────────────────
 # Serial reader
 # ──────────────────────────────────────────────────────────────
-async def serial_reader_task(port: str, baud: int):
-    global session
-    try:
-        ser = serial.Serial(port, baud, timeout=0.001)
-        serial_conn["ser"] = ser
-        system_status.update({"connected": True, "serial_port": port, "baud_rate": baud})
-        print(f"[SERIAL] Conectado a {port} @ {baud} baud")
-    except Exception as e:
-        print(f"[SERIAL] Error: {e}"); system_status["connected"] = False; return
-    buf = bytearray()
-    while True:
+class SerialConnectRequest(BaseModel):
+    port: str = Field(min_length=1, max_length=256)
+    baud: int = Field(default=115200, ge=300, le=4000000)
+
+
+def available_serial_ports():
+    ports = []
+    aliases = sorted(Path('/dev/serial/by-id').glob('*')) if platform.system() == 'Linux' else []
+    for p in sorted(list_ports.comports(), key=lambda p: p.device):
+        stable = next((str(alias) for alias in aliases if alias.resolve() == Path(p.device).resolve()), p.device)
+        ports.append({"device": stable, "description": p.description or p.device, "path": p.device})
+    return ports
+
+
+def validate_serial_port(port):
+    os_name = platform.system()
+    if os_name == "Windows":
+        port = port.upper()
+        valid = re.fullmatch(r"COM[1-9][0-9]*", port)
+    else:
+        valid = port.startswith("/dev/") and ".." not in port.split("/")
+    if not valid:
+        raise ValueError(f"Puerto inválido para {os_name}: {port}")
+    for item in available_serial_ports():
+        if port in (item["device"], item["path"]):
+            return item["device"]
+    raise ValueError(f"Puerto no disponible: {port}. Actualiza la lista de puertos.")
+
+
+@app.get("/api/serial/ports")
+async def get_serial_ports():
+    return {"platform": platform.system(), "ports": available_serial_ports()}
+
+
+@app.post("/api/serial/connect")
+async def connect_serial(req: SerialConnectRequest):
+    async with serial_manager.lock:
         try:
-            data = ser.read(256)
-            if data: buf.extend(data)
-            while len(buf) >= 4:
-                if buf[0] != CRSF_SYNC: buf.pop(0); continue
-                total_len = buf[1] + 2
-                if len(buf) < total_len: break
-                frame = bytes(buf[:total_len]); buf = buf[total_len:]
-                parsed = parse_crsf_frame(frame)
-                if parsed:
-                    ts = datetime.now(timezone.utc).isoformat()
-                    fd = {"timestamp": ts, **parsed}
-                    telemetry_history.append(fd)
-                    system_status["frames_received"] += 1
-                    if session:
-                        session.record(parsed["type"], parsed["data"], ts)
-                        system_status["current_session_frames"] = session.current_frame_count
-                    await manager.broadcast(fd)
-            if not data: await asyncio.sleep(0)
-        except Exception as e:
-            print(f"[SERIAL] Error: {e}"); await asyncio.sleep(0.1)
+            port = validate_serial_port(req.port.strip())
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        connected = await serial_manager.connect(port, req.baud)
+        telemetry_history.clear()
+        return JSONResponse({"connected": connected, "serial_port": port,
+                             "baud_rate": req.baud, "retrying": not connected,
+                             "error": system_status['serial_error']}, status_code=200 if connected else 202)
+
+
+@app.post("/api/serial/disconnect")
+async def disconnect_serial():
+    async with serial_manager.lock:
+        await serial_manager.disconnect()
+        return {"connected": False}
+
+
+async def serial_data(data):
+    buf = serial_buffer
+    buf.extend(data)
+    while len(buf) >= 4:
+        if buf[0] != CRSF_SYNC or not 2 <= buf[1] <= 62:
+            del buf[0]
+            continue
+        total_len = buf[1] + 2
+        if len(buf) < total_len:
+            break
+        frame = bytes(buf[:total_len])
+        del buf[:total_len]
+        parsed = parse_crsf_frame(frame)
+        if parsed:
+            ts = datetime.now(timezone.utc).isoformat()
+            fd = {"timestamp": ts, **parsed}
+            telemetry_history.append(fd)
+            system_status["frames_received"] += 1
+            if session:
+                session.record(parsed["type"], parsed["data"], ts)
+                system_status["current_session_frames"] = session.current_frame_count
+            await manager.broadcast(fd)
+
+
+serial_manager = SerialManager(system_status, available_serial_ports, serial_data, serial_lost)
 
 
 # ──────────────────────────────────────────────────────────────
@@ -330,12 +395,12 @@ async def get_video_status():
     return JSONResponse({"available": True, **video.status})
 
 @app.get("/api/video/config")
-async def get_video_config():
+async def get_video_config(profile: Literal["analog", "digital"] = "analog"):
     if not VIDEO_AVAILABLE or not load_video_config:
         return JSONResponse({"brightness": 0, "contrast": 32, "saturation": 60,
                              "gamma": 1.0, "hist_eq": False,
                              "wb_r": 1.0, "wb_g": 1.0, "wb_b": 1.0})
-    return JSONResponse(load_video_config())
+    return JSONResponse(profile_config(profile))
 
 @app.post("/api/video/config")
 async def update_video_config(req: VideoConfigRequest):
@@ -351,12 +416,16 @@ async def update_video_config(req: VideoConfigRequest):
         "wb_g":       req.wb_g,
         "wb_b":       req.wb_b,
     }
+    cfg = {key: value for key, value in cfg.items() if value is not None}
     if CONFIG_FILE and load_video_config:
         existing = load_video_config()
-        existing.update(cfg)
+        if req.profile == "digital":
+            existing["digital"] = {**existing.get("digital", {}), **cfg}
+        else:
+            existing.update(cfg)
         with open(CONFIG_FILE, "w") as f:
             json.dump(existing, f, indent=2)
-    if video.capture.is_running:
+    if video.capture.is_running and video.capture.profile == req.profile:
         video.capture.update_config(cfg)
     return JSONResponse({"updated": True, "config": cfg})
 
@@ -365,7 +434,7 @@ async def start_video(req: VideoStartRequest):
     if not VIDEO_AVAILABLE or not video:
         return JSONResponse({"error": "Módulo de video no disponible"}, status_code=503)
     try:
-        ok = await video.start_capture(req.device_id, req.width, req.height, req.fps)
+        ok = await video.start_capture(req.device_id, req.width, req.height, req.fps, req.profile, req.standard)
     except RuntimeError as exc:
         return JSONResponse({"error": str(exc)}, status_code=409)
     if not ok:
@@ -511,15 +580,26 @@ async def update_rc_config(req: RCConfigRequest):
     injector.rate_hz    = max(1.0, min(250.0, req.rate_hz))
     injector.deadman_ms = max(100.0, min(5000.0, req.deadman_ms))
     injector.sync_byte  = sync
+    if not req.enabled:
+        injector.reset()
+        injector.send_failsafe()
     if req.enabled and not injector.enabled:
         injector.reset()   # arranca en failsafe hasta el primer comando
     injector.enabled = req.enabled
     return JSONResponse({"updated": True, **injector.status})
 
+@app.post("/api/rc/acquire")
+async def acquire_rc(req: RCChannelsRequest):
+    try:
+        return {"epoch": injector.acquire("http", req.channels)}
+    except (ValueError, TypeError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=409)
+
+
 @app.post("/api/rc/channels")
 async def set_rc_channels(req: RCChannelsRequest):
     try:
-        applied = injector.set_channels(req.channels)
+        applied = injector.set_channels(req.channels, "http", req.epoch)
     except (ValueError, TypeError) as e:
         return JSONResponse({"error": str(e)}, status_code=400)
     return JSONResponse({"updated": True, "applied": applied,
@@ -528,20 +608,29 @@ async def set_rc_channels(req: RCChannelsRequest):
 @app.post("/api/rc/center")
 async def center_rc_channels():
     injector.center()
+    injector.send_failsafe()
     return JSONResponse({"centered": True, "channels_us": injector.status["channels_us"]})
 
 @app.websocket("/ws/rc")
 async def rc_websocket(ws: WebSocket):
     """Canal de baja latencia para el panel de control manual / gamepad.
-    Mensajes: {"channels": {...}} — misma forma que POST /api/rc/channels.
-    El deadman del injector cubre la desconexión del cliente."""
+    Adquirir: {"action": "acquire", "channels": {16 canales}}.
+    Comandos: {"epoch": token, "channels": {16 canales}}.
+    Desconectar revoca inmediatamente al propietario y envía failsafe."""
     await ws.accept()
+    owner = object()
     try:
         while True:
             msg = await ws.receive_text()
             try:
                 data = json.loads(msg)
-                applied = injector.set_channels(data.get("channels", {}))
+                if not isinstance(data, dict):
+                    raise ValueError("Mensaje RC inválido")
+                if data.get("action") == "acquire":
+                    epoch = injector.acquire(owner, data.get("channels"))
+                    await ws.send_text(json.dumps({"ok": True, "epoch": epoch}))
+                    continue
+                applied = injector.set_channels(data.get("channels"), owner, data.get("epoch"))
                 await ws.send_text(json.dumps({
                     "ok": True, "applied": {str(k): v for k, v in applied.items()},
                     "failsafe_active": injector.failsafe_active,
@@ -550,6 +639,8 @@ async def rc_websocket(ws: WebSocket):
                 await ws.send_text(json.dumps({"ok": False, "error": str(e)}))
     except WebSocketDisconnect:
         pass
+    finally:
+        injector.release(owner)
 
 
 @app.post("/offer")
@@ -604,7 +695,7 @@ else:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="ELRS Telemetry Server v2.7.1")
-    parser.add_argument("--port", default="COM6")
+    parser.add_argument("--port", default=None, help="Puerto inicial opcional; seleccionable desde la interfaz")
     parser.add_argument("--baud", type=int, default=115200)
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--web-port", type=int, default=8080)

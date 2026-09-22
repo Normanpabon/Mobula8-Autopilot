@@ -4,10 +4,10 @@ Diseño de `backend/command_injector.py` (v2.7.0): cómo el PC envía comandos
 RC a la TX12 por USB serial, qué garantías de seguridad tiene, y cuál es la
 incógnita de protocolo que solo el hardware puede responder.
 
-Última revisión: 2026-09-21, código base v2.7.0. Ver
-[`REVISION_DEBIAN13.md`](REVISION_DEBIAN13.md) para los defectos observados y
-el plan de banco en Linux. Las pruebas históricas con loopback no validan
-la radio ni todos los casos de pérdida de mando.
+Última revisión: 2026-09-22. Selección y reconexión serial centralizadas en
+`SerialManager`. El contrato RC ahora requiere adquisición explícita,
+propietario y época; los clientes anteriores deben actualizarse.
+Las pruebas automatizadas no validan la entrada física de la TX12.
 
 ---
 
@@ -21,8 +21,8 @@ telemetría + visión → decisión → [ESTA PIEZA] → TX12 → ELRS → Mobul
 
 El PC construye frames **CRSF RC Channels Packed** (tipo `0x16`: 16 canales
 × 11 bits, 22 bytes de payload, CRC8 DVB-S2) y los escribe por el mismo
-puerto USB serial por el que ya lee la telemetría (full-duplex; el reader y
-el injector comparten el handle `serial_conn` sin estorbarse).
+puerto USB serial por el que ya lee la telemetría (full-duplex; el gestor
+es el único dueño del puerto y ejecuta las lecturas y escrituras).
 
 Convención de canales (Betaflight AETR): `1=roll, 2=pitch, 3=throttle,
 4=yaw, 5–16=aux`. Valores en microsegundos **988–2012** (1500 = centro);
@@ -40,8 +40,8 @@ estado; no envía frames directamente.
 ### Deadman switch (la garantía central)
 
 Si no llega **ninguna** actualización de canales en `deadman_ms` (default
-500 ms), el loop conmuta a los valores de failsafe hasta el siguiente
-comando:
+500 ms, reloj monotónico), se invalidan el propietario, la época y los
+valores almacenados. El loop transmite failsafe hasta adquirir de nuevo:
 
 | Canal | Failsafe | Por qué |
 |-------|----------|---------|
@@ -57,12 +57,12 @@ muerte del navegador: el panel de la UI envía a 10 Hz fijos por
 transmitidos pasan a failsafe, mientras el proceso y su event loop sigan
 funcionando. No es una garantía de tiempo real.
 
-**Limitaciones verificadas (2026-09-21):** desconectar el gamepad conserva
-sus últimos valores en sliders y la UI sigue enviándolos, impidiendo que
-expire el deadman. Al expirar en backend tampoco se borran las consignas:
-una actualización parcial puede reactivar throttle antiguo. Deben corregirse
-antes de pruebas físicas de control. `channels_us` muestra el estado
-almacenado, no necesariamente los canales de failsafe transmitidos.
+**Correcciones 2026-09-22:** desconectar el gamepad centra y revoca el
+control. Cerrar el WebSocket propietario revoca la época y solicita un
+frame de failsafe inmediatamente. El timeout borra las consignas; ningún
+comando parcial ni token anterior puede reactivarlas. Los comandos se
+validan completos antes de modificar el estado, rechazando NaN/infinito.
+La UI requiere deshabilitar/habilitar RC después de perder el control.
 
 Nota de alcance: el deadman protege del lado PC. La red de seguridad final
 sigue siendo el failsafe del propio ELRS/Betaflight (pérdida de RF ⇒ drop),
@@ -122,9 +122,10 @@ protocolo, recuperación de mando y seguridad con hardware siguen pendientes.
 |--------|----------|-------------|
 | `GET` | `/api/rc/status` | Estado: enabled, deadman, canales actuales, frames enviados, serial |
 | `POST` | `/api/rc/config` | `enabled`, `rate_hz` (1–250), `deadman_ms` (100–5000), `sync_byte` (`0xEE`/`0xEA`/`0xC8`) |
-| `POST` | `/api/rc/channels` | `{"channels": {"throttle": 1600, "1": 1450, ...}}` — alias AETR o índice 1–16, µs |
+| `POST` | `/api/rc/acquire` | Estado completo de 16 canales con throttle=988; devuelve `epoch`; requiere RC habilitado y sin propietario activo |
+| `POST` | `/api/rc/channels` | `{"epoch": "token", "channels": {"1": 1500, ... , "16": 988}}` — requiere los 16 canales; admite alias AETR sin duplicados |
 | `POST` | `/api/rc/center` | Todos los canales a failsafe (posición segura) |
-| `WS` | `/ws/rc` | Mismo payload que `/api/rc/channels`, para el envío continuo de la UI/gamepad |
+| `WS` | `/ws/rc` | Primero `{"action":"acquire","channels":{...16 canales...}}`; luego comandos con el `epoch` recibido; propietario ligado al socket |
 
 El panel **RC** de la UI usa `WS /ws/rc` a 10 Hz con sliders AETR o un
 gamepad (Web Gamepad API, mapeo Mode 2: stick izquierdo throttle/yaw,
@@ -133,7 +134,7 @@ derecho roll/pitch).
 ## 6. Integración prevista con el autopilot (Fase 4)
 
 `autopilot.py` será otro cliente del injector (llamadas directas a
-`set_channels()`, no HTTP): produce consignas AETR a su propio ritmo y el
+`acquire()` y `set_channels(channels, owner, epoch)`, no HTTP): produce estados completos a su propio ritmo y el
 deadman lo cubre igual — si la máquina de estados se cuelga, los canales
 caen a failsafe. El límite de velocidad del `LatencyGovernor`
 (`VISION_PIPELINE.md` §4) se aplica **antes** de traducir la consigna a µs.

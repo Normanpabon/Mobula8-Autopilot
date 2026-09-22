@@ -11,14 +11,14 @@ telemetría. Diseño (ver docs/RC_INJECTION.md):
 - **Deadman switch**: si no llega ninguna actualización de canales en
   `deadman_ms` (default 500 ms), el loop envía los valores de failsafe
   (throttle al mínimo, roll/pitch/yaw centrados, aux abajo) hasta recibir
-  el siguiente comando. También aplica antes del primer comando.
+  una adquisición explícita con estado completo y throttle mínimo. También aplica antes del primer comando.
 - **Sin serial, sin inyección**: recibe un `write_fn` (callable → bool);
   si el puerto no está conectado la inyección no se puede habilitar.
 
 ⚠ PENDIENTE DE VALIDACIÓN DE PROTOCOLO (roadmap): no está confirmado que
 EdgeTX acepte CRSF de entrada por USB serial en modo Telem Mirror. Este
-módulo implementa el lado PC completo; la alternativa si la TX12 no lo
-acepta es el modo Joystick USB HID de EdgeTX (fuera de este módulo).
+módulo implementa el lado PC completo; USB Joystick exporta canales hacia el PC y no es una ruta de entrada.
+La interfaz PC → EdgeTX requiere validación física independiente.
 El byte de dirección es configurable (`sync_byte`) para poder probar
 0xEE (módulo transmisor), 0xEA (radio) o 0xC8 (FC) en la validación.
 
@@ -29,6 +29,8 @@ Convención de canales (Betaflight AETR): 1=roll, 2=pitch, 3=throttle,
 import asyncio
 import time
 import logging
+import math
+import uuid
 from typing import Callable, Optional
 
 log = logging.getLogger("command_injector")
@@ -95,6 +97,8 @@ class CommandInjector:
         self.failsafe_us = [US_MID, US_MID, US_MIN, US_MID] + [US_MIN] * 12
         self._channels_us = list(self.failsafe_us)
 
+        self.owner = None
+        self.epoch = None
         self._last_cmd_ts = 0.0   # 0 = nunca se recibió un comando
         self._task: Optional[asyncio.Task] = None
         self._running     = False
@@ -105,43 +109,75 @@ class CommandInjector:
     def failsafe_active(self) -> bool:
         """Deadman: sin comandos aún, o el último es más viejo que deadman_ms."""
         return (self._last_cmd_ts == 0.0
-                or (time.time() - self._last_cmd_ts) * 1000.0 > self.deadman_ms)
+                or (time.monotonic() - self._last_cmd_ts) * 1000.0 > self.deadman_ms)
 
     # ── Canales ──────────────────────────────────────────────────────────────
 
-    def set_channels(self, channels: dict) -> dict:
-        """
-        Actualiza canales y resetea el deadman. Acepta claves 1–16 (int o
-        str numérica) y alias AETR ("roll"/"pitch"/"throttle"/"yaw").
-        Valores en µs, se recortan a 988–2012. Devuelve lo aplicado.
-        """
+    def _parse_channels(self, channels):
+        if not isinstance(channels, dict) or not channels:
+            raise ValueError("Se requiere un estado de canales")
         applied = {}
         for key, us in channels.items():
-            if isinstance(key, str) and key.lower() in CHANNEL_ALIASES:
-                idx = CHANNEL_ALIASES[key.lower()]
-            else:
+            idx = CHANNEL_ALIASES.get(str(key).lower())
+            if idx is None:
                 idx = int(key)
-            if not 1 <= idx <= self.CHANNELS:
-                raise ValueError(f"Canal {idx} fuera de rango (1–{self.CHANNELS})")
-            clamped = max(US_MIN, min(US_MAX, float(us)))
-            self._channels_us[idx - 1] = clamped
-            applied[idx] = clamped
-        if applied:
-            self._last_cmd_ts = time.time()
+            if not 1 <= idx <= self.CHANNELS or idx in applied:
+                raise ValueError("Canal inválido o duplicado")
+            value = float(us)
+            if not math.isfinite(value) or not US_MIN <= value <= US_MAX:
+                raise ValueError("Canal fuera de rango 988–2012")
+            applied[idx] = value
         return applied
 
-    def center(self) -> None:
-        """Vuelve todos los canales al estado de failsafe (posición segura)."""
-        self._channels_us = list(self.failsafe_us)
-        self._last_cmd_ts = time.time()
+    def acquire(self, owner, channels):
+        if not self.enabled:
+            raise ValueError("Habilita RC antes de adquirir control")
+        if self.failsafe_active:
+            self.reset()
+        if self.owner is not None:
+            raise ValueError("El control ya tiene propietario")
+        applied = self._parse_channels(channels)
+        if len(applied) != self.CHANNELS or applied[3] != US_MIN:
+            raise ValueError("Adquirir requiere los 16 canales y throttle mínimo")
+        self.owner, self.epoch = owner, uuid.uuid4().hex
+        self._channels_us = [applied[i] for i in range(1, 17)]
+        self._last_cmd_ts = time.monotonic()
+        return self.epoch
 
-    def reset(self) -> None:
-        """
-        Estado seguro para (re)habilitar la inyección: canales en failsafe
-        y deadman armado (failsafe activo hasta recibir el primer comando).
-        """
+    def set_channels(self, channels, owner=None, epoch=None):
+        if self.failsafe_active:
+            self.reset()
+        if not self.enabled or self.owner is None or owner != self.owner or epoch != self.epoch:
+            raise ValueError("Control no adquirido o época expirada; readquiere con throttle mínimo")
+        applied = self._parse_channels(channels)
+        if len(applied) != self.CHANNELS:
+            raise ValueError("Cada comando requiere los 16 canales")
+        self._channels_us = [applied[i] for i in range(1, 17)]
+        self._last_cmd_ts = time.monotonic()
+        return applied
+
+    def center(self):
+        self.reset()
+
+    def reset(self):
         self._channels_us = list(self.failsafe_us)
         self._last_cmd_ts = 0.0
+        self.owner = self.epoch = None
+
+    def release(self, owner):
+        if self.owner == owner:
+            self.reset()
+            self.send_failsafe()
+
+    def send_failsafe(self):
+        if self.enabled and self.can_transmit:
+            try:
+                if self._write(self.build_rc_frame(self.failsafe_us)):
+                    self.frames_sent += 1
+                else:
+                    self.write_errors += 1
+            except Exception:
+                self.write_errors += 1
 
     # ── Construcción de frames CRSF ──────────────────────────────────────────
 
@@ -193,6 +229,8 @@ class CommandInjector:
 
     async def stop(self) -> None:
         self._running = False
+        self.reset()
+        self.send_failsafe()
         self.enabled  = False
         if self._task:
             self._task.cancel()
@@ -211,7 +249,9 @@ class CommandInjector:
                 continue
 
             # Deadman: sin comandos recientes (o nunca) → valores de failsafe
-            us = self.failsafe_us if self.failsafe_active else self._channels_us
+            if self.failsafe_active:
+                self.reset()
+            us = self._channels_us
 
             try:
                 if self._write(self.build_rc_frame(us)):
@@ -228,9 +268,10 @@ class CommandInjector:
 
     @property
     def status(self) -> dict:
-        age_ms = ((time.time() - self._last_cmd_ts) * 1000.0
+        age_ms = ((time.monotonic() - self._last_cmd_ts) * 1000.0
                   if self._last_cmd_ts else None)
         return {
+            "control_owned":    self.owner is not None and not self.failsafe_active,
             "available":        self.can_transmit,
             "enabled":          self.enabled,
             "running":          self._running,

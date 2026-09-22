@@ -176,9 +176,7 @@ class VideoTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_shutdown_finalizes_recording(self):
         await self.open_capture()
-        async def no_serial(*args):
-            return
-        with patch.object(api, 'video', self.stream), patch.object(api, 'serial_reader_task', no_serial):
+        with patch.object(api, 'video', self.stream):
             async with api.lifespan(api.app):
                 path = await self.stream.start_recording('shutdown')
                 await asyncio.sleep(.08)
