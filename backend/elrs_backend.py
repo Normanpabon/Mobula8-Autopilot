@@ -17,7 +17,7 @@ from serial.tools import list_ports
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request as FRequest
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, model_validator, StrictBool
 import uvicorn
 
 from session_manager import SessionManager
@@ -204,6 +204,10 @@ class SegmentationConfigRequest(BaseModel):
     confidence: float = 0.35
     focus_mode: str   = "mask"  # "mask": suprime fondo antes del detector | "overlay": solo visual
     imgsz:      int   = 416
+
+class VisionROIRequest(BaseModel):
+    cells: List[StrictBool] = Field(min_length=96, max_length=96)
+
 
 class GovernorConfigRequest(BaseModel):
     safety_distance_m: float = 3.0
@@ -477,6 +481,23 @@ async def get_vision_status():
         return JSONResponse({"available": False})
     return JSONResponse(video.vision.status)
 
+@app.get("/api/vision/roi")
+async def get_vision_roi():
+    if not VIDEO_AVAILABLE or not video or not video.vision:
+        return JSONResponse({"error": "Visión no disponible"}, status_code=503)
+    return JSONResponse(video.vision.roi_status)
+
+
+@app.post("/api/vision/roi")
+async def update_vision_roi(req: VisionROIRequest):
+    if not VIDEO_AVAILABLE or not video or not video.vision:
+        return JSONResponse({"error": "Visión no disponible"}, status_code=503)
+    try:
+        return JSONResponse(video.vision.set_roi(req.cells))
+    except OSError:
+        return JSONResponse({"error": "No se pudo guardar el área de visión"}, status_code=500)
+
+
 @app.get("/api/vision/models")
 async def list_vision_models():
     det_defaults = ["yolov8n.pt", "yolov8s.pt", "yolov8m.pt"]
@@ -527,7 +548,7 @@ async def update_vision_governor(req: GovernorConfigRequest):
 async def get_yolo_status():
     if not VIDEO_AVAILABLE or not video or not video.yolo:
         return JSONResponse({"available": False})
-    return JSONResponse(video.yolo.status)
+    return JSONResponse(video.vision.status["detection"])
 
 @app.get("/api/yolo/models")
 async def list_yolo_models():
@@ -670,12 +691,12 @@ if frontend_path.exists():
     @app.get("/css/{file_path:path}")
     async def serve_css(file_path: str):
         f = frontend_path / "css" / file_path
-        return FileResponse(f, media_type="text/css") if f.exists() else JSONResponse({}, 404)
+        return FileResponse(f, media_type="text/css", headers={"Cache-Control": "no-cache"}) if f.exists() else JSONResponse({}, 404)
 
     @app.get("/js/{file_path:path}")
     async def serve_js(file_path: str):
         f = frontend_path / "js" / file_path
-        return FileResponse(f, media_type="application/javascript") if f.exists() else JSONResponse({}, 404)
+        return FileResponse(f, media_type="application/javascript", headers={"Cache-Control": "no-cache"}) if f.exists() else JSONResponse({}, 404)
 
     @app.get("/logs.html")
     async def serve_logs_page():
@@ -687,7 +708,7 @@ if frontend_path.exists():
         if full_path.startswith("api/") or full_path == "ws":
             return JSONResponse({"error": "Not found"}, status_code=404)
         index = frontend_path / "index.html"
-        return FileResponse(index) if index.exists() else JSONResponse({"error": "Not found"}, 404)
+        return FileResponse(index, headers={"Cache-Control": "no-cache"}) if index.exists() else JSONResponse({"error": "Not found"}, 404)
 else:
     @app.get("/")
     async def root(): return JSONResponse({"message": "ELRS v2.7.1", "error": "frontend/ not found"})

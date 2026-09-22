@@ -32,6 +32,7 @@ import cv2
 
 from yolo_processor import YOLOProcessor
 from segmentation_processor import SegmentationProcessor
+from vision_roi import RegionSelection, CONFIG_FILE as ROI_CONFIG_FILE
 
 log = logging.getLogger("vision_pipeline")
 
@@ -47,6 +48,8 @@ class VisionResult:
     pipeline_ms:  float = 0.0
     seg_used:     bool  = False
     det_used:     bool  = False
+    roi_revision: int = 0
+    frame_shape: tuple = ()
     ts:           float = 0.0   # time.time() al terminar la pasada
 
 
@@ -122,7 +125,15 @@ class VisionPipeline:
     # No dibujar resultados más viejos que esto (engañarían al piloto)
     OVERLAY_MAX_AGE_S = 2.0
 
-    def __init__(self):
+    def __init__(self, roi_path=ROI_CONFIG_FILE):
+        self._roi_path = roi_path
+        try:
+            self._roi = RegionSelection.load(roi_path)
+        except (ValueError, KeyError, TypeError, OSError) as exc:
+            log.error("ROI inválida: %s; inferencia pausada", exc)
+            self._roi = RegionSelection((False,) * 96)
+        self._roi_revision = 0
+        self._roi_state = (self._roi, self._roi_revision)
         self.detector  = YOLOProcessor()
         self.segmenter = SegmentationProcessor()
         self.governor  = LatencyGovernor()
@@ -142,8 +153,26 @@ class VisionPipeline:
     @property
     def active(self) -> bool:
         """True si al menos una etapa está encendida y con modelo cargado."""
-        return ((self.segmenter.enabled and self.segmenter.is_loaded)
+        return any(self._roi.cells) and ((self.segmenter.enabled and self.segmenter.is_loaded)
                 or (self.detector.enabled and self.detector.is_loaded))
+
+    @property
+    def roi_status(self):
+        return {**self._roi.status, 'revision': self._roi_revision}
+
+    def set_roi(self, cells):
+        selection = RegionSelection(tuple(cells))
+        selection.save(self._roi_path)
+        self._roi = selection
+        self._roi_revision += 1
+        self._roi_state = (self._roi, self._roi_revision)
+        self._latest = None
+        self._vision_fps = 0.0
+        return self.roi_status
+
+    def _publish(self, result):
+        if result.roi_revision == self._roi_revision:
+            self._latest = result
 
     def start(self, frame_getter) -> None:
         """Arranca el loop de inferencia. `frame_getter`: async → BGR o None."""
@@ -183,7 +212,7 @@ class VisionPipeline:
                     self._executor, self._process, frame)
                 dt = time.perf_counter() - t0
                 self._vision_fps = round(1.0 / dt, 1) if dt > 0 else 0.0
-                self._latest = result
+                self._publish(result)
             except Exception as e:
                 log.error(f"[Vision] Error en pipeline: {e}")
                 await asyncio.sleep(0.5)
@@ -196,30 +225,56 @@ class VisionPipeline:
         seg_used = self.segmenter.enabled and self.segmenter.is_loaded
         det_used = self.detector.enabled and self.detector.is_loaded
 
-        mask = None
-        contours: list = []
-        region_count = 0
+        selection, revision = self._roi_state
+        full_mask = selection.mask(*frame_bgr.shape[:2])
+        ys, xs = np.flatnonzero(full_mask.any(axis=1)), np.flatnonzero(full_mask.any(axis=0))
+        if not len(xs):
+            return VisionResult(roi_revision=revision, frame_shape=frame_bgr.shape[:2], ts=time.time())
+        x0, xend, y0, yend = int(xs.min()), int(xs.max()) + 1, int(ys.min()), int(ys.max()) + 1
+        roi_mask = full_mask[y0:yend, x0:xend]
+        # Crop the envelope for useful model resolution, mask holes/propellers.
+        cropped = cv2.bitwise_and(frame_bgr[y0:yend, x0:xend],
+                                 frame_bgr[y0:yend, x0:xend], mask=roi_mask)
+        work = cropped
+        contours = []
         seg_ms = det_ms = 0.0
-        detections: list = []
-
-        work = frame_bgr
+        detections = []
         if seg_used:
-            mask         = self.segmenter.segment(frame_bgr)
-            seg_ms       = self.segmenter._inf_ms
-            contours     = self.segmenter._last_contours
-            region_count = self.segmenter._region_count
+            mask = self.segmenter.segment(cropped)
+            seg_ms = self.segmenter._inf_ms
+            if mask is not None:
+                # Clip even the segmenter's dilation to the user's selection.
+                mask = cv2.bitwise_and(mask, roi_mask)
+                local_contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                offset = np.array([[[x0, y0]]], dtype=np.int32)
+                contours = [contour + offset for contour in local_contours]
             if det_used and self.segmenter.focus_mode == "mask":
-                work = SegmentationProcessor.apply_focus(frame_bgr, mask)
+                work = SegmentationProcessor.apply_focus(cropped, mask)
 
         if det_used:
-            detections = self.detector.infer(work)
-            det_ms     = self.detector._inf_ms
+            raw_detections = self.detector.infer(work)
+            det_ms = self.detector._inf_ms
+            h, w = roi_mask.shape
+            for detection in raw_detections:
+                box = np.asarray(detection['bbox'], dtype=float)
+                if box.shape != (4,) or not np.isfinite(box).all():
+                    continue
+                x1, y1, x2, y2 = np.clip(box, [0, 0, 0, 0], [w, h, w, h])
+                if x2 <= x1 or y2 <= y1:
+                    continue
+                cx, cy = min(w - 1, int((x1 + x2) / 2)), min(h - 1, int((y1 + y2) / 2))
+                area = roi_mask[int(y1):int(np.ceil(y2)), int(x1):int(np.ceil(x2))]
+                if not roi_mask[cy, cx] or np.count_nonzero(area) < area.size / 2:
+                    continue
+                detections.append({**detection, 'bbox': [float(x1 + x0), float(y1 + y0),
+                                                        float(x2 + x0), float(y2 + y0)]})
 
         return VisionResult(
-            detections=detections, contours=contours, region_count=region_count,
+            detections=detections, contours=contours, region_count=len(contours),
             seg_ms=seg_ms, det_ms=det_ms,
             pipeline_ms=round((time.perf_counter() - t0) * 1000, 1),
             seg_used=seg_used, det_used=det_used, ts=time.time(),
+            roi_revision=revision, frame_shape=frame_bgr.shape[:2],
         )
 
     # ── Overlay (camino del stream — debe ser barato) ────────────────────────
@@ -234,9 +289,10 @@ class VisionPipeline:
         if not self.active:
             return frame_bgr
         r = self._latest
-        if r is None:
+        if r is None or r.roi_revision != self._roi_revision or r.frame_shape != frame_bgr.shape[:2]:
             return frame_bgr
 
+        original = frame_bgr.copy() if not all(self._roi.cells) else None
         age = time.time() - r.ts
         if age <= self.OVERLAY_MAX_AGE_S:
             if r.contours:
@@ -248,6 +304,10 @@ class VisionPipeline:
                 cv2.putText(frame_bgr, label, (x1, max(y1 - 6, 12)),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (136, 255, 0), 1,
                             cv2.LINE_AA)
+
+        if original is not None:
+            excluded = self._roi.mask(*frame_bgr.shape[:2]) == 0
+            frame_bgr[excluded] = original[excluded]
 
         # HUD de latencia + governor (abajo a la izquierda)
         gov = self.governor.evaluate(r, True)
@@ -276,8 +336,11 @@ class VisionPipeline:
             "available":    self.is_available(),
             "running":      self._running,
             "active":       self.active,
-            "detection":    self.detector.status,
-            "segmentation": self.segmenter.status,
+            "roi": self.roi_status,
+            "detection": {**self.detector.status,
+                          "detections": r.detections if r else [],
+                          "detection_count": len(r.detections) if r else 0},
+            "segmentation": {**self.segmenter.status, "region_count": r.region_count if r else 0},
             "latency": {
                 "seg_ms":         r.seg_ms if r else 0.0,
                 "det_ms":         r.det_ms if r else 0.0,

@@ -494,3 +494,22 @@ body {
 .telemetry-page { display: flex; flex-direction: column; }
 .telemetry-page > .app-header, .telemetry-page > .serial-controls { flex-shrink: 0; }
 .telemetry-page > .main-grid { flex: 1; min-height: 0; height: auto; }
+
+/* ROI coordinates follow the displayed video, including analog aspect correction. */
+#visionRoiGrid {
+    position: absolute;
+    display: grid;
+    grid-template-columns: repeat(12, minmax(0, 1fr));
+    grid-template-rows: repeat(8, minmax(0, 1fr));
+    pointer-events: none;
+    z-index: 2;
+}
+#visionRoiGrid[hidden], #roiTools[hidden] { display: none; }
+#visionRoiGrid.editing { pointer-events: auto; touch-action: none; }
+.roi-cell { min-width: 0; min-height: 0; padding: 0; border: 0; background: transparent; }
+.roi-cell.excluded { background: repeating-linear-gradient(135deg, #0008 0 5px, #ef444440 5px 7px); }
+.editing .roi-cell { border: 1px solid #ffffff55; background-color: #22c55e18; cursor: crosshair; }
+.editing .roi-cell.excluded { background-color: #ef444460; }
+.roi-cell:focus-visible { outline: 2px solid white; outline-offset: -2px; }
+.roi-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+#roiMessage { font-size: 11px; color: var(--text-secondary); }

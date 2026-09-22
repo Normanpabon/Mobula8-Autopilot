@@ -47,7 +47,7 @@ admite una calibración digital explícita si se conocen los rangos del disposit
 - `POST /api/video/start {"device_id": 2, "profile": "analog", "standard": "ntsc"}`.
 - PAL usa `standard: "pal"` dentro del preset analógico.
 - `width` y `height` opcionales deben enviarse juntos; permiten solicitar un
-  modo concreto en lugar de negociación adaptativa. `fps` también es opcional.
+  tamaño concreto; en Digital se negocia igualmente el formato de píxel. `fps` también es opcional.
 - `GET /api/video/config?profile=digital` obtiene la calibración correspondiente.
 - `POST /api/video/config` acepta `profile`; omitirlo conserva compatibilidad
   con la calibración analógica anterior.
@@ -71,3 +71,36 @@ admite una calibración digital explícita si se conocen los rangos del disposit
 
 Permanece la limitación conocida de un driver bloqueado dentro de cap.read():
 este cambio no sustituye el aislamiento pendiente de la captura en un proceso.
+
+## Diagnóstico físico de la cámara integrada — 2026-09-22
+
+Se consultó V4L2 en el equipo de la prueba (sin guardar imágenes):
+
+- `/dev/video0`, cámara RGB: máximo anunciado **1280×720**, MJPG a 30 FPS;
+  YUYV a esa resolución solo ofrece 10 FPS. El modo YUYV 640×480 ofrece 30 FPS.
+- `/dev/video2`, cámara infrarroja: GREY 640×360; no confundir con la RGB.
+- El backend activo estaba en 1280×720/YUYV/10 FPS con resolución explícita
+  (`adaptive=false`). No se reprodujo el rótulo de frontend 640×480 durante
+  esta inspección; ese valor no describe el máximo anunciado por la RGB.
+
+Se corrigió el bypass de negociación: un tamaño digital explícito también
+prueba MJPEG y el formato sin FOURCC forzado. `negotiation` incluye el formato
+real de cada intento y la interfaz muestra el FOURCC junto a resolución/FPS.
+HTML, JS y CSS requieren revalidación HTTP para evitar reutilizar controles
+antiguos después de actualizar el servicio; una pestaña ya abierta debe recargarse.
+
+También se encontraron controles persistentes alterados: brillo 64, contraste
+54 y saturación 100 frente a defaults 128, 32 y 64. Al abrir Digital en Linux
+se consultan y restauran únicamente esos tres defaults mediante `v4l2-ctl`
+(paquete `v4l-utils`), salvo ajustes digitales explícitos guardados. No se
+asumen rangos iguales entre cámaras. Si la herramienta falta o falla, se
+registra el aviso y continúa la captura. Windows conserva sus controles;
+este mecanismo de restauración corresponde a V4L2/Linux.
+
+Prueba real con el código corregido: **1280×720/MJPG, 30 FPS nominales**;
+entre **10 y 15 FPS efectivos** en dos tomas de medición de seis segundos.
+Se verificó por lectura posterior del driver la restauración 128/32/64.
+`exposure_dynamic_framerate=1` estaba habilitado y se dejó intacto: negociar
+30 FPS no garantiza obtenerlos bajo la exposición/iluminación actual.
+No se validó calidad visual final de WebRTC ni se grabaron archivos en esta
+prueba. Permanecen las pruebas prolongadas y de latencia anteriores.

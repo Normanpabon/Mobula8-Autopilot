@@ -45,6 +45,9 @@ class CaptureDevice:
 
 class VideoTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
+        reset = patch.object(vs, 'restore_digital_color_defaults', return_value={})
+        reset.start()
+        self.addCleanup(reset.stop)
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         self.folder = Path(self.directory.name)
@@ -173,6 +176,20 @@ class VideoTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(response.status_code, 422)
                 response = await client.post('/api/video/start', json={'width':-1})
                 self.assertEqual(response.status_code, 422)
+
+    async def test_close_peers_tolerates_reentrant_callbacks(self):
+        manager = vs.WebRTCManager(lambda: None)
+        closed = []
+        class Peer:
+            def __init__(self, key):
+                self.key = key
+            async def close(self):
+                closed.append(self.key)
+                await manager._remove_peer(self.key)
+        manager._peers = {key: Peer(key) for key in ['one', 'two']}
+        await manager.close_all()
+        self.assertCountEqual(closed, ['one', 'two'])
+        self.assertEqual(manager.peer_count, 0)
 
     async def test_shutdown_finalizes_recording(self):
         await self.open_capture()

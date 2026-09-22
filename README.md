@@ -274,6 +274,14 @@ está en `models/`.
 
 ---
 
+## Área de detección y segmentación
+
+En el reproductor, pulsa **Área IA** y desmarca las celdas ocupadas por las
+hélices con clic o arrastre. **Aplicar** guarda la selección para ambos
+modelos; **Cancelar** conserva el área anterior. **Nada** pausa la inferencia.
+La grilla de 12×8 se adapta a la resolución y la proporción del video.
+Consulta [el funcionamiento y la API del área de inferencia](docs/VISION_PIPELINE.md#7-grilla-de-área-de-inferencia).
+
 ## Presets de video
 
 Selecciona **Digital · adaptable hasta 1080p** para webcam o capturadora HD,

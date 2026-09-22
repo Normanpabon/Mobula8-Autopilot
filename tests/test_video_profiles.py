@@ -35,6 +35,9 @@ class Camera:
 
 class ProfileTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
+        reset = patch.object(vs, 'restore_digital_color_defaults', return_value={})
+        reset.start()
+        self.addCleanup(reset.stop)
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         for target, value in [('VIDEO_DIR', Path(self.directory.name)),
@@ -89,6 +92,32 @@ class ProfileTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('1920', self.stream.capture.format_warning)
         self.assertGreater(len(self.stream.capture.negotiation), 1)
 
+    async def test_explicit_720p_negotiates_mjpeg_for_30fps(self):
+        class YogaCamera(Camera):
+            def get(self, prop):
+                if prop == cv2.CAP_PROP_FPS:
+                    return 30 if self.settings.get(cv2.CAP_PROP_FOURCC) == cv2.VideoWriter_fourcc(*'MJPG') else 10
+                return super().get(prop)
+        with patch.object(vs, '_open_capture', side_effect=lambda _: YogaCamera((720,1280))):
+            self.assertTrue(await self.stream.start_capture(width=1280, height=720, fps=30, profile='digital'))
+        status = self.stream.capture.status
+        self.assertFalse(status['requested']['adaptive'])
+        self.assertEqual(status['pixel_format'], 'MJPG')
+        self.assertEqual(status['fps'], 30)
+        self.assertEqual(status['negotiation'][0]['pixel_format'], 'MJPG')
+        self.assertIsNone(status['format_warning'])
+
+    async def test_explicit_size_still_supports_non_mjpeg_device(self):
+        class UncompressedCamera(Camera):
+            def read(self):
+                if cv2.CAP_PROP_FOURCC in self.settings:
+                    return False, None
+                return super().read()
+        with patch.object(vs, '_open_capture', side_effect=lambda _: UncompressedCamera((720,1280), 10)):
+            self.assertTrue(await self.stream.start_capture(width=1280, height=720, profile='digital'))
+        self.assertEqual(self.stream.capture.fps, 10)
+        self.assertIn('10.00', self.stream.capture.format_warning)
+
     async def test_analog_pal_ntsc_keep_calibration_and_native_size(self):
         for standard, height, fps in [('ntsc',480,vs.NTSC_FPS), ('pal',576,25)]:
             device = Camera((height, 720), fps)
@@ -129,3 +158,28 @@ class ProfileTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(response.status_code, 200)
                 self.assertEqual(response.json()['width'], 1920)
                 self.assertTrue(response.json()['requested']['adaptive'])
+
+
+class ColorDefaultsTests(unittest.TestCase):
+    def test_uses_driver_defaults_and_preserves_calibrated_controls(self):
+        from types import SimpleNamespace
+        info = """
+ brightness 0x00000001 (int) : min=0 max=255 default=128 value=64
+ contrast 0x00000002 (int) : min=0 max=100 default=32 value=54
+ saturation 0x00000003 (int) : min=0 max=100 default=64 value=100
+ exposure_dynamic_framerate 0x00000004 (bool) : default=0 value=1
+"""
+        with patch.object(vs.sys, 'platform', 'linux'), patch.object(
+                vs.subprocess, 'run', return_value=SimpleNamespace(stdout=info)) as run:
+            result = vs.restore_digital_color_defaults(0, {'contrast':40})
+        self.assertEqual(result, {'brightness':128, 'saturation':64})
+        self.assertEqual(run.call_args.args[0][-1], 'brightness=128,saturation=64')
+
+    def test_windows_never_applies_linux_defaults(self):
+        with patch.object(vs.sys, 'platform', 'win32'), patch.object(vs.subprocess, 'run') as run:
+            self.assertEqual(vs.restore_digital_color_defaults(0, {}), {})
+        run.assert_not_called()
+
+    def test_missing_v4l2_is_nonfatal(self):
+        with patch.object(vs.sys, 'platform', 'linux'), patch.object(vs.subprocess, 'run', side_effect=FileNotFoundError):
+            self.assertEqual(vs.restore_digital_color_defaults(0, {}), {})

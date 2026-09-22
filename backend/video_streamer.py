@@ -21,6 +21,7 @@ import logging
 import math
 import fractions
 import json
+import re
 from uuid import uuid4
 from datetime import datetime, timezone
 from pathlib import Path
@@ -99,6 +100,40 @@ def profile_config(profile, saved=None):
         return {k: v for k, v in saved.items() if k != "digital"}
     return {"gamma": 1.0, "hist_eq": False, "wb_r": 1.0, "wb_g": 1.0,
             "wb_b": 1.0, **saved.get("digital", {})}
+
+
+def restore_digital_color_defaults(device_id, cfg):
+    """Undo legacy analog settings persisted by a Linux UVC driver.
+
+    OpenCV has no portable query for control defaults. Query V4L2's actual
+    defaults rather than assuming that all cameras share numeric ranges.
+    Preserve explicitly calibrated digital controls and all exposure settings.
+    """
+    if not sys.platform.startswith("linux"):
+        return {}
+    device = f"/dev/video{device_id}"
+    try:
+        info = subprocess.run(["v4l2-ctl", "--device", device, "--list-ctrls"],
+                              capture_output=True, text=True, timeout=2, check=True)
+        defaults = {}
+        for line in info.stdout.splitlines():
+            match = re.match(r"\s*(brightness|contrast|saturation)\s+.*\bdefault=(-?\d+)\b", line)
+            if match and match[1] not in cfg:
+                defaults[match[1]] = int(match[2])
+        if defaults:
+            subprocess.run(["v4l2-ctl", "--device", device, "--set-ctrl",
+                            ','.join(f"{key}={value}" for key, value in defaults.items())],
+                           capture_output=True, text=True, timeout=2, check=True)
+        return defaults
+    except (OSError, subprocess.SubprocessError) as exc:
+        log.warning("No se pudieron restaurar valores de color de %s: %s", device, exc)
+        return {}
+
+
+def capture_fourcc(cap):
+    value = cap.get(cv2.CAP_PROP_FOURCC)
+    fourcc = int(value) if math.isfinite(value) else 0
+    return ''.join(chr((fourcc >> (8 * i)) & 255) for i in range(4)).strip('\x00') or "driver default"
 
 
 def capture_request(width=None, height=None, fps=None, profile="digital", standard="ntsc"):
@@ -277,6 +312,7 @@ class VideoCapture:
         self.standard = "ntsc"
         self.negotiation = []
         self.pixel_format = None
+        self.color_defaults = {}
         self._cfg = profile_config(self.profile)
         self.is_running = False
         self.device_id = 0
@@ -322,25 +358,33 @@ class VideoCapture:
 
     def _open_configured(self, device_id, width, height, fps):
         self.negotiation = []
-        if not self.requested["adaptive"]:
+        self.color_defaults = {}
+        if self.profile == "analog":
             return self._open_mode(device_id, width, height, fps)
+        self.color_defaults = restore_digital_color_defaults(device_id, self._cfg)
         # Try common HD UVC modes with MJPEG (USB bandwidth) and the driver's
         # default codec. Inspect actual frames: set() success is not evidence.
-        modes = [(1920, 1080, "MJPG"), (1920, 1080, None),
-                 (1280, 720, "MJPG"), (1280, 720, None), (None, None, None)]
+        if self.requested["adaptive"]:
+            modes = [(1920, 1080, "MJPG"), (1920, 1080, None),
+                     (1280, 720, "MJPG"), (1280, 720, None), (None, None, None)]
+        else:
+            # Choosing dimensions must not bypass pixel-format negotiation:
+            # this Yoga camera supports 720p/30 MJPEG, but only 720p/10 YUYV.
+            modes = [(width, height, "MJPG"), (width, height, None)]
         best = None
         for mode in modes:
             cap = None
             try:
                 cap, frame, driver_fps = self._open_mode(device_id, *mode[:2], fps, mode[2])
                 h, w = frame.shape[:2]
-                self.negotiation.append({"requested": list(mode), "actual": [w, h], "fps": driver_fps if math.isfinite(driver_fps) else None})
+                self.negotiation.append({"requested": list(mode), "actual": [w, h], "fps": driver_fps if math.isfinite(driver_fps) else None,
+                                         "pixel_format": capture_fourcc(cap)})
                 if w > 1920 or h > 1080:
                     continue
                 score = (w * h, min(driver_fps, fps) if math.isfinite(driver_fps) and driver_fps > 0 else 0)
                 if best is None or score > best[0]:
                     best = (score, mode)
-                if w == 1920 and h == 1080 and math.isfinite(driver_fps) and driver_fps >= fps * 0.9:
+                if w == width and h == height and math.isfinite(driver_fps) and driver_fps >= fps * 0.9:
                     result, cap = (cap, frame, driver_fps), None
                     return result
                 if mode == modes[-1] and best[1] == mode:
@@ -376,9 +420,7 @@ class VideoCapture:
             log.error(self.error)
             return False
         self._cap = cap
-        fourcc_value = cap.get(cv2.CAP_PROP_FOURCC)
-        fourcc = int(fourcc_value) if math.isfinite(fourcc_value) else 0
-        self.pixel_format = ''.join(chr((fourcc >> (8 * i)) & 255) for i in range(4)).strip('\x00') or "driver default"
+        self.pixel_format = capture_fourcc(cap)
         self.height, self.width = frame.shape[:2]
         valid_fps = math.isfinite(driver_fps) and 0 < driver_fps <= 240
         self.fps = float(driver_fps) if valid_fps else target_fps
@@ -463,6 +505,7 @@ class VideoCapture:
             "format_warning": self.format_warning,
             "profile": self.profile, "standard": self.standard,
             "pixel_format": self.pixel_format, "negotiation": self.negotiation,
+            "color_defaults_restored": self.color_defaults,
         }
 
 
@@ -634,9 +677,9 @@ class WebRTCManager:
 
     async def close_all(self):
         """Cierra todas las conexiones."""
-        for pc in self._peers.values():
-            await pc.close()
-        self._peers.clear()
+        peers = list(self._peers.values())
+        self._peers.clear()  # close callbacks may remove peers reentrantly
+        await asyncio.gather(*(pc.close() for pc in peers))
 
     @property
     def peer_count(self) -> int:

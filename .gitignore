@@ -15,3 +15,7 @@ venv/
 # Editor
 .vscode/
 .idea/
+
+# Área de inferencia elegida localmente por el operador
+backend/vision_roi.json
+backend/vision_roi.tmp

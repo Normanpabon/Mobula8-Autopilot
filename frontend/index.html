@@ -26,7 +26,7 @@
             display: flex; align-items: center; gap: 8px;
             padding: 10px 14px;
             background: linear-gradient(transparent, rgba(0,0,0,.85));
-            flex-wrap: wrap;
+            flex-wrap: wrap; z-index: 4;
         }
         .vc-group { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; max-width: 100%; }
         .vc-status-group { margin-left: auto; }
@@ -283,6 +283,7 @@
             <div id="videoSurface" style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:#000;">
                 <video id="fpvVideo" autoplay playsinline muted
                        style="object-fit:fill;background:#000;display:none;"></video>
+                <div id="visionRoiGrid" aria-label="Celdas incluidas en detección y segmentación" hidden></div>
             </div>
             <div style="position:absolute;top:10px;left:10px;right:10px;z-index:2;pointer-events:none;color:#e2e8f0;font-size:12px;text-shadow:0 1px 3px #000;">
                 <div id="videoFormat" aria-live="polite">Captura: sin iniciar</div>
@@ -447,6 +448,17 @@
                     </select>
                 </div>
 
+                <div class="vc-group roi-controls">
+                    <button id="roiEdit" class="vc-btn" type="button" aria-expanded="false">▦ Área IA</button>
+                    <span id="roiTools" hidden>
+                        <button id="roiAll" class="vc-btn" type="button">Todo</button>
+                        <button id="roiNone" class="vc-btn" type="button">Nada</button>
+                        <button id="roiApply" class="vc-btn vc-btn-primary" type="button">Aplicar</button>
+                        <button id="roiCancel" class="vc-btn" type="button">Cancelar</button>
+                    </span>
+                    <span id="roiMessage" role="status" aria-live="polite">Área de detección y segmentación</span>
+                </div>
+
                 <!-- Stream control -->
                 <div class="vc-group">
                     <button id="btnStream" class="vc-btn vc-btn-primary" onclick="videoToggle()">
@@ -496,11 +508,13 @@
     <script type="module" src="js/app.js"></script>
     <script type="module">
         import { VideoPlayer } from './js/modules/VideoPlayer.js';
+        import { VisionROI } from './js/modules/VisionROI.js';
         import { captureOptions, defaultAspect } from './js/modules/VideoPresets.js';
 
         // ── State ──────────────────────────────────
         let player      = null;
         let streaming   = false;
+        let visionROI   = null;
 
         // ── Init ───────────────────────────────────
         async function initVideo() {
@@ -523,10 +537,12 @@
                     if (streaming) await player.connect(selectedCaptureOptions());
                 });
             }
+            visionROI = new VisionROI(videoEl, document.getElementById('videoSurface'));
             applyProfile();
             document.getElementById('videoAspect').addEventListener('change', applyVideoAspect);
             videoEl.addEventListener('resize', applyVideoAspect);
             new ResizeObserver(applyVideoAspect).observe(document.getElementById('videoSurface'));
+            new ResizeObserver(applyVideoAspect).observe(document.getElementById('videoControls'));
             let polling = false;
             setInterval(async () => {
                 if (!player.connected || polling) return;
@@ -559,6 +575,7 @@
         function applyVideoAspect() {
             const video = document.getElementById('fpvVideo');
             const surface = document.getElementById('videoSurface');
+            surface.style.bottom = `${document.getElementById('videoControls').offsetHeight}px`;
             const mode = document.getElementById('videoAspect').value;
             const ratio = mode === 'native'
                 ? ((video.videoWidth || 1920) / (video.videoHeight || 1080))
@@ -566,6 +583,7 @@
             const width = Math.min(surface.clientWidth, surface.clientHeight * ratio);
             video.style.width = `${width}px`;
             video.style.height = `${width / ratio}px`;
+            visionROI?.sync();
         }
 
         async function loadDevices() {
@@ -930,7 +948,7 @@
         function updateVideoUI({ state, recording, capture, recorder }) {
             const format = document.getElementById('videoFormat');
             format.textContent = capture
-                ? `Captura ${capture.width}×${capture.height} · ${Number(capture.fps).toFixed(2)} FPS nominales · ${Number(capture.measured_fps || 0).toFixed(1)} FPS medidos · Navegador ${document.getElementById('fpvVideo').videoWidth || "—"}×${document.getElementById('fpvVideo').videoHeight || "—"}`
+                ? `Captura ${capture.width}×${capture.height} · ${capture.pixel_format || "formato desconocido"} · ${Number(capture.fps).toFixed(2)} FPS nominales · ${Number(capture.measured_fps || 0).toFixed(1)} FPS medidos · Navegador ${document.getElementById('fpvVideo').videoWidth || "—"}×${document.getElementById('fpvVideo').videoHeight || "—"}`
                 : 'Captura: sin iniciar';
             const notice = capture?.error || recorder?.error || capture?.format_warning || '';
             const saved = !recording && recorder?.output_path

@@ -176,3 +176,50 @@ debajo, hover).
   etapa de segmentación.
 - `reaction_time_ms` real, medible solo cuando exista la inyección de
   comandos (Fase 3).
+
+## 7. Grilla de área de inferencia
+
+En el reproductor, abrir **Área IA**. La grilla tiene 12 columnas y 8 filas:
+las celdas activas reciben detección y segmentación; las rayadas en rojo
+quedan excluidas. Clic o arrastre alterna/pinta celdas. También se pueden
+recorrer con Tab y alternar con Espacio. **Todo**, **Nada**, **Aplicar** y
+**Cancelar** permiten editar sin cambiar el área en ejecución hasta aplicar.
+Una selección vacía pausa la inferencia de ambas etapas.
+
+La grilla sigue los límites del video, no las bandas negras del reproductor.
+Las coordenadas proporcionales funcionan con NTSC/PAL, HD, 1080p y cambios de
+proporción de visualización. Las grabaciones conservan la imagen completa.
+La selección se guarda en `backend/vision_roi.json` (configuración local,
+excluida de Git), compartida por ambas etapas y los clientes del servidor.
+También se conserva al cambiar de cámara: revisar el área al cambiar la
+posición de cámara o la geometría de las hélices. Inicialmente todo está
+seleccionado. Una configuración ilegible pausa la inferencia y registra
+el error, evitando ampliar silenciosamente el área.
+
+Antes de inferir se recorta el rectángulo que contiene las celdas activas y
+se ponen a negro los huecos/celdas excluidas. Ambos modelos reciben esa
+imagen; no se ejecuta un modelo por celda. La segmentación y su dilatación
+se limitan a la selección. Las detecciones necesitan su centro dentro del
+área y al menos la mitad de su caja sobre píxeles seleccionados. Las cajas
+y contornos se trasladan a coordenadas del frame original; el dibujo se
+limita al área seleccionada. El HUD de latencia sigue siendo global.
+
+Cambiar de selección invalida el resultado publicado y descarta los
+resultados en vuelo calculados con la revisión anterior. El estado del
+pipeline y `/api/yolo/status` muestran las detecciones filtradas y con
+coordenadas restauradas, no las detecciones intermedias del recorte.
+
+API: `GET /api/vision/roi` devuelve `rows`, `cols`, `cells`,
+`selected_count`, `total_count` y `revision`. `POST /api/vision/roi` recibe
+`{"cells": [true, false, ...]}` con exactamente 96 booleanos, en orden por
+filas desde la esquina superior izquierda. Un fallo al persistir responde
+500 y conserva la selección anterior. `/api/vision/status` incluye `roi`.
+
+Validación: tests de máscara, recorte, traslación, persistencia, vaciado,
+resultados en vuelo, API y edición del frontend. Prueba de navegador con
+video sintético y selección de las esquinas inferiores. Falta validar el
+contorno elegido sobre video real del drone: la grilla no reconoce las
+hélices automáticamente ni garantiza eliminar todos los falsos positivos.
+La máscara puede alterar el comportamiento del modelo cerca de sus bordes;
+la ganancia de velocidad depende del recorte y no del número de celdas
+excluidas por sí solo.
