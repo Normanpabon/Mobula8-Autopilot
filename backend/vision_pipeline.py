@@ -1,37 +1,16 @@
-"""
-VisionPipeline — Cascada de visión por computadora sobre el video FPV
-=====================================================================
-Orquesta las dos etapas de visión y su impacto en el vuelo:
-
-    captura → [segmentación] → [detección YOLO] → overlay + LatencyGovernor
-
-Diseño (v2.6.0, ver docs/VISION_PIPELINE.md):
-
-- **Inferencia desacoplada del stream**: un loop propio toma el último frame
-  disponible, corre las etapas habilitadas en un ThreadPoolExecutor de
-  1 worker y publica el resultado (detecciones, contornos, latencias).
-  El track WebRTC nunca espera a la inferencia: `annotate()` solo dibuja el
-  último resultado publicado sobre el frame actual (<1 ms de cv2). El video
-  mantiene sus FPS aunque la visión corra a 2–5 FPS.
-- **Etapas independientes**: `segmenter.enabled` y `detector.enabled` se
-  encienden/apagan por separado. Con ambas encendidas y focus_mode="mask",
-  la máscara de segmentación suprime el fondo antes del detector.
-- **LatencyGovernor**: traduce la latencia medida del pipeline en una
-  velocidad máxima recomendada para el futuro autopilot (Fase 4). Más
-  etapas encendidas → más latencia → menor velocidad recomendada.
-"""
-
+"""Single-model vision worker, independent of WebRTC, with ROI and latency governor."""
 import asyncio
 import concurrent.futures
 import time
 import logging
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Optional
 import numpy as np
 import cv2
 
-from yolo_processor import YOLOProcessor
-from segmentation_processor import SegmentationProcessor
+from vision_model import VisionModel
+from vision_config import VisionConfig, CONFIG_FILE
 from vision_roi import RegionSelection, CONFIG_FILE as ROI_CONFIG_FILE
 
 log = logging.getLogger("vision_pipeline")
@@ -48,6 +27,7 @@ class VisionResult:
     pipeline_ms:  float = 0.0
     seg_used:     bool  = False
     det_used:     bool  = False
+    config_revision: int = 0
     roi_revision: int = 0
     frame_shape: tuple = ()
     ts:           float = 0.0   # time.time() al terminar la pasada
@@ -125,7 +105,7 @@ class VisionPipeline:
     # No dibujar resultados más viejos que esto (engañarían al piloto)
     OVERLAY_MAX_AGE_S = 2.0
 
-    def __init__(self, roi_path=ROI_CONFIG_FILE):
+    def __init__(self, roi_path=ROI_CONFIG_FILE, config_path=CONFIG_FILE, model_factory=None):
         self._roi_path = roi_path
         try:
             self._roi = RegionSelection.load(roi_path)
@@ -134,8 +114,15 @@ class VisionPipeline:
             self._roi = RegionSelection((False,) * 96)
         self._roi_revision = 0
         self._roi_state = (self._roi, self._roi_revision)
-        self.detector  = YOLOProcessor()
-        self.segmenter = SegmentationProcessor()
+        self._config_path = config_path
+        self.config = VisionConfig.load(config_path)
+        self._model_factory = model_factory
+        self.model = VisionModel(self.config, factory=model_factory)
+        self._config_revision = 0
+        self._model_state = (self.model, self._config_revision)
+        self._metrics = deque(maxlen=10000)
+        self._configure_lock = asyncio.Lock()
+        self._error = None
         self.governor  = LatencyGovernor()
         self._executor = concurrent.futures.ThreadPoolExecutor(
             max_workers=1, thread_name_prefix="vision")
@@ -148,13 +135,30 @@ class VisionPipeline:
     # ── Ciclo de vida ────────────────────────────────────────────────────────
 
     def is_available(self) -> bool:
-        return self.detector.is_available()
+        return self.model.is_available()
 
     @property
     def active(self) -> bool:
-        """True si al menos una etapa está encendida y con modelo cargado."""
-        return any(self._roi.cells) and ((self.segmenter.enabled and self.segmenter.is_loaded)
-                or (self.detector.enabled and self.detector.is_loaded))
+        return (any(self._roi.cells) and bool(self.config.coco_classes.enabled)
+                and self.config.pipeline_mode != 'off' and self.model.is_loaded)
+
+    async def configure(self, patch, persist=True):
+        # Model construction and warm-up share the single inference worker.
+        async with self._configure_lock:
+            config = self.config.patched(patch)
+            candidate = VisionModel(config, factory=self._model_factory)
+            await asyncio.get_running_loop().run_in_executor(self._executor, candidate.load)
+            if persist:
+                config.save(self._config_path)
+            self.config = config
+            self.model = candidate
+            self._config_revision += 1
+            self._model_state = (candidate, self._config_revision)
+            self._metrics.clear()
+            self._latest = None
+            self._vision_fps = 0.0
+            self._error = None
+            return self.config.model_dump()
 
     @property
     def roi_status(self):
@@ -168,11 +172,15 @@ class VisionPipeline:
         self._roi_state = (self._roi, self._roi_revision)
         self._latest = None
         self._vision_fps = 0.0
+        self._metrics.clear()
         return self.roi_status
 
     def _publish(self, result):
-        if result.roi_revision == self._roi_revision:
+        if (self._running and result.config_revision == self._config_revision
+                and result.roi_revision == self._roi_revision):
             self._latest = result
+            if self.config.benchmark.collect_metrics:
+                self._metrics.append((time.monotonic(), result.seg_ms + result.det_ms, result.pipeline_ms))
 
     def start(self, frame_getter) -> None:
         """Arranca el loop de inferencia. `frame_getter`: async → BGR o None."""
@@ -198,6 +206,12 @@ class VisionPipeline:
 
     async def _run_loop(self):
         loop = asyncio.get_event_loop()
+        if not self.model.is_loaded and self.config.pipeline_mode != 'off':
+            try:
+                await self.configure({}, persist=False)
+            except Exception as exc:
+                self._error = str(exc)
+                log.error('No se pudo iniciar visión: %s', exc)
         while self._running:
             if not self.active or self._frame_getter is None:
                 await asyncio.sleep(0.2)
@@ -220,43 +234,31 @@ class VisionPipeline:
             await asyncio.sleep(0)
 
     def _process(self, frame_bgr: np.ndarray) -> VisionResult:
-        """Cascada síncrona: [segmentación] → [detección]. Corre en el worker."""
+        """Una inferencia por frame; cajas y máscaras comparten la misma salida."""
         t0 = time.perf_counter()
-        seg_used = self.segmenter.enabled and self.segmenter.is_loaded
-        det_used = self.detector.enabled and self.detector.is_loaded
+        model, config_revision = self._model_state
+        seg_used = model.config.pipeline_mode == 'segment' and model.is_loaded
+        det_used = model.config.pipeline_mode == 'detect' and model.is_loaded
 
         selection, revision = self._roi_state
         full_mask = selection.mask(*frame_bgr.shape[:2])
         ys, xs = np.flatnonzero(full_mask.any(axis=1)), np.flatnonzero(full_mask.any(axis=0))
         if not len(xs):
-            return VisionResult(roi_revision=revision, frame_shape=frame_bgr.shape[:2], ts=time.time())
+            return VisionResult(config_revision=config_revision, roi_revision=revision, frame_shape=frame_bgr.shape[:2], ts=time.time())
         x0, xend, y0, yend = int(xs.min()), int(xs.max()) + 1, int(ys.min()), int(ys.max()) + 1
         roi_mask = full_mask[y0:yend, x0:xend]
         # Crop the envelope for useful model resolution, mask holes/propellers.
         cropped = cv2.bitwise_and(frame_bgr[y0:yend, x0:xend],
                                  frame_bgr[y0:yend, x0:xend], mask=roi_mask)
-        work = cropped
         contours = []
-        seg_ms = det_ms = 0.0
         detections = []
-        if seg_used:
-            mask = self.segmenter.segment(cropped)
-            seg_ms = self.segmenter._inf_ms
-            if mask is not None:
-                # Clip even the segmenter's dilation to the user's selection.
-                mask = cv2.bitwise_and(mask, roi_mask)
-                local_contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                offset = np.array([[[x0, y0]]], dtype=np.int32)
-                contours = [contour + offset for contour in local_contours]
-            if det_used and self.segmenter.focus_mode == "mask":
-                work = SegmentationProcessor.apply_focus(cropped, mask)
-
-        if det_used:
-            raw_detections = self.detector.infer(work)
-            det_ms = self.detector._inf_ms
+        raw_detections = model.infer(cropped) if seg_used or det_used else []
+        seg_ms = model.inference_ms if seg_used else 0.0
+        det_ms = model.inference_ms if det_used else 0.0
+        if raw_detections:
             h, w = roi_mask.shape
             for detection in raw_detections:
-                box = np.asarray(detection['bbox'], dtype=float)
+                box = np.asarray(detection.bbox, dtype=float)
                 if box.shape != (4,) or not np.isfinite(box).all():
                     continue
                 x1, y1, x2, y2 = np.clip(box, [0, 0, 0, 0], [w, h, w, h])
@@ -266,15 +268,22 @@ class VisionPipeline:
                 area = roi_mask[int(y1):int(np.ceil(y2)), int(x1):int(np.ceil(x2))]
                 if not roi_mask[cy, cx] or np.count_nonzero(area) < area.size / 2:
                     continue
-                detections.append({**detection, 'bbox': [float(x1 + x0), float(y1 + y0),
-                                                        float(x2 + x0), float(y2 + y0)]})
+                detections.append({'class_id': detection.class_id, 'class': detection.class_name,
+                                   'confidence': detection.confidence,
+                                   'bbox': [float(x1 + x0), float(y1 + y0), float(x2 + x0), float(y2 + y0)]})
+                if detection.mask is not None:
+                    mask = cv2.bitwise_and(detection.mask, roi_mask)
+                    local, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                    offset = np.array([[[x0, y0]]], dtype=np.int32)
+                    contours.extend(contour + offset for contour in local)
+
 
         return VisionResult(
             detections=detections, contours=contours, region_count=len(contours),
             seg_ms=seg_ms, det_ms=det_ms,
             pipeline_ms=round((time.perf_counter() - t0) * 1000, 1),
             seg_used=seg_used, det_used=det_used, ts=time.time(),
-            roi_revision=revision, frame_shape=frame_bgr.shape[:2],
+            config_revision=config_revision, roi_revision=revision, frame_shape=frame_bgr.shape[:2],
         )
 
     # ── Overlay (camino del stream — debe ser barato) ────────────────────────
@@ -289,19 +298,21 @@ class VisionPipeline:
         if not self.active:
             return frame_bgr
         r = self._latest
-        if r is None or r.roi_revision != self._roi_revision or r.frame_shape != frame_bgr.shape[:2]:
+        if r is None or r.config_revision != self._config_revision or r.roi_revision != self._roi_revision or r.frame_shape != frame_bgr.shape[:2]:
             return frame_bgr
 
         original = frame_bgr.copy() if not all(self._roi.cells) else None
         age = time.time() - r.ts
         if age <= self.OVERLAY_MAX_AGE_S:
-            if r.contours:
+            if r.contours and self.config.overlay.masks:
                 cv2.drawContours(frame_bgr, r.contours, -1, (0, 255, 255), 2)
             for d in r.detections:
                 x1, y1, x2, y2 = (int(v) for v in d["bbox"])
-                cv2.rectangle(frame_bgr, (x1, y1), (x2, y2), (136, 255, 0), 2)
+                if self.config.overlay.boxes:
+                    cv2.rectangle(frame_bgr, (x1, y1), (x2, y2), (136, 255, 0), 2)
                 label = f"{d['class']} {d['confidence']:.2f}"
-                cv2.putText(frame_bgr, label, (x1, max(y1 - 6, 12)),
+                if self.config.overlay.labels:
+                    cv2.putText(frame_bgr, label, (x1, max(y1 - 6, 12)),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (136, 255, 0), 1,
                             cv2.LINE_AA)
 
@@ -331,16 +342,31 @@ class VisionPipeline:
     @property
     def status(self) -> dict:
         r = self._latest
+        cutoff = time.monotonic() - self.config.benchmark.window_seconds
+        while self._metrics and self._metrics[0][0] < cutoff:
+            self._metrics.popleft()
+        samples = list(self._metrics)
+        metrics = {'samples': len(samples), 'window_seconds': self.config.benchmark.window_seconds}
+        for index, name in ((1, 'inference_ms'), (2, 'pipeline_ms')):
+            metrics[name] = dict(zip(('p50', 'p95'), map(float, np.percentile(
+                [sample[index] for sample in samples], [50, 95])))) if samples else None
         age_ms = round((time.time() - r.ts) * 1000, 1) if r else None
         return {
+            **self.model.status,
+            "error": self._error,
+            "metrics": metrics,
+            "inference_ms": (r.seg_ms + r.det_ms) if r else 0.0,
+            "pipeline_ms": r.pipeline_ms if r else 0.0,
+            "vision_fps": self._vision_fps,
+            "result_age_ms": age_ms,
             "available":    self.is_available(),
             "running":      self._running,
             "active":       self.active,
             "roi": self.roi_status,
-            "detection": {**self.detector.status,
+            "detection": {"enabled": self.config.pipeline_mode != "off",
                           "detections": r.detections if r else [],
                           "detection_count": len(r.detections) if r else 0},
-            "segmentation": {**self.segmenter.status, "region_count": r.region_count if r else 0},
+            "segmentation": {"enabled": self.config.pipeline_mode == "segment", "region_count": r.region_count if r else 0},
             "latency": {
                 "seg_ms":         r.seg_ms if r else 0.0,
                 "det_ms":         r.det_ms if r else 0.0,
@@ -348,5 +374,5 @@ class VisionPipeline:
                 "result_age_ms":  age_ms,
                 "vision_fps":     self._vision_fps,
             },
-            "governor": self.governor.evaluate(r, self.active),
+            "governor": self.governor.evaluate(r, self.config.pipeline_mode != 'off' and any(self._roi.cells)),
         }

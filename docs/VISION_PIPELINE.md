@@ -1,225 +1,122 @@
-# Pipeline de visión y política de latencia — Mobula8-Autopilot
+# Pipeline de visión YOLO26
 
-Diseño del flujo de procesamiento de video con visión por computadora
-(v2.6.0): cascada segmentación → detección YOLO, etapas conmutables, y cómo
-la latencia que introducen gobernará el comportamiento del futuro piloto
-automático (Fase 4).
+El pipeline tiene tres modos excluyentes:
 
-Última actualización: 2026-07-11 (v2.6.0).
-
----
-
-## 1. Flujo de procesamiento
-
-```
-                 VideoCapture (OpenCV, loop propio)
-                        │  frames BGR corregidos (WB/gamma)
-                        ▼
-        ┌─────────── último frame ────────────┐
-        │                                     │
-        ▼ (cada frame, <1 ms)                 ▼ (al ritmo que pueda, 2–15 FPS)
-  VisionPipeline.annotate()            VisionPipeline._run_loop()
-  dibuja el ÚLTIMO resultado           ThreadPoolExecutor (1 worker):
-  publicado (cajas, contornos,           [segmentación]  seg.enabled
-  HUD de latencia y Vmax)                     │ máscara (focus_mode="mask":
-        │                                     ▼  suprime el fondo)
-        ▼                                [detección YOLO] det.enabled
-  FPVVideoTrack → WebRTC                      │
-                                              ▼
-                                       VisionResult {detecciones, contornos,
-                                       latencias por etapa, timestamp}
-                                              │
-                                              ▼
-                                       LatencyGovernor → Vmax recomendada
+```text
+captura ─────────────────────────────── WebRTC + grabación limpia
+   └── último frame → worker de visión → resultado → overlay / governor
+                       OFF: sin inferencia
+                       DETECT: YOLO26n → cajas
+                       SEGMENT: YOLO26n-seg → cajas y máscaras
 ```
 
-Módulos: `backend/vision_pipeline.py` (orquestador + governor),
-`backend/segmentation_processor.py` (etapa 1), `backend/yolo_processor.py`
-(etapa 2). `video_streamer.py` los conecta al ciclo de vida de la captura.
+`VisionModel` carga un modelo y normaliza resultados en `Detection`. SEGMENT
+extrae cajas y polígonos de la misma llamada. No hay preprocesador SEG→DET ni
+procesadores independientes. Las máscaras se construyen desde `masks.xy`,
+que conserva las coordenadas de la imagen original tras quitar letterboxing.
 
-### Decisión clave: inferencia desacoplada del stream
+`VisionPipeline` conserva un solo executor, la selección ROI 12×8, recorte de
+su envolvente, enmascarado de huecos y traducción de cajas al frame completo.
+Descarta cajas cuyo centro queda fuera de ROI o cuya área seleccionada es
+menor a la mitad. Recorta máscaras y overlay a las celdas seleccionadas.
+Selección vacía pausa inferencia. El frame original no se modifica.
 
-Hasta v2.5.0 la inferencia YOLO corría **dentro** de `recv()` del track
-WebRTC: cada frame del stream esperaba a la red neuronal, así que un modelo
-a 120 ms/frame degradaba el video a 8 FPS.
+`annotate()` solo dibuja el resultado publicado; nunca carga ni infiere. La
+grabación sigue recibiendo frames limpios. No dibuja resultados de otra
+resolución, revisión ROI/configuración o con más de dos segundos de edad.
 
-Desde v2.6.0 la inferencia corre en un **loop propio** sobre el último frame
-disponible y publica resultados; el stream solo dibuja el último resultado
-publicado (primitivas cv2, <1 ms). Consecuencias:
+## Configuración
 
-- El video mantiene sus ~30 FPS aunque la visión corra a 2 FPS.
-- Las anotaciones pueden ir "atrasadas" respecto al frame mostrado (como
-  máximo un ciclo de inferencia). El HUD muestra la latencia real para que
-  el desfase sea visible, y los resultados con más de 2 s no se dibujan.
-- Los frames que la visión no alcanza a procesar **se descartan** (siempre
-  se toma el último, nunca se encola) — la frescura importa más que la
-  completitud para controlar un drone.
+`backend/config/vision.json` contiene defaults versionados y recibe los cambios
+persistidos desde la API. Revisar el diff antes de commitear ajustes locales.
+Modo inicial: detect; carga en el worker al iniciar captura, sin bloquear
+WebRTC. Si falla, status muestra el error y governor queda en warming_up.
+OFF permite operar sin Ultralytics. Reintentar aplicando configuración.
 
-## 2. Etapas conmutables y sus combinaciones
-
-Cada etapa se enciende/apaga por separado (`POST /api/segmentation/config`,
-`POST /api/yolo/config`); el costo en latencia se paga solo por lo encendido:
-
-| Segmentación | Detección | Comportamiento | Latencia típica (CPU, yolov8n@640 / n-seg@416) |
-|--------------|-----------|----------------|------------------------------------------------|
-| off | off | Video puro, visión inactiva, governor en modo `off` | 0 ms |
-| off | on  | Detección clásica: cajas sobre el frame completo | ~120–150 ms |
-| on (`overlay`) | off | Solo contornos de regiones — para evaluar la etapa | ~55–90 ms |
-| on (`overlay`) | on | Ambas sobre el frame completo, independientes | ~175–240 ms |
-| on (`mask`) | on | **Cascada**: la máscara (dilatada `mask_margin_px`) suprime el fondo antes del detector | ~135–175 ms |
-
-El modo `mask` es la razón de ser de la etapa de segmentación: en video
-analógico con ruido de la EasyCap, suprimir el fondo antes del detector
-reduce falsos positivos. El costo es la inferencia extra; si en la práctica
-el detector fine-tuneado solo ya es suficientemente robusto, la etapa se
-apaga y esa latencia se recupera. `overlay` existe para poder evaluar la
-segmentación sin afectar a la detección.
-
-Ambas etapas comparten **un solo worker** (cascada secuencial): en CPU no
-hay cores de sobra para paralelizar dos redes, y la cascada necesita la
-máscara antes de detectar de todos modos.
-
-## 3. Presupuesto de latencia extremo a extremo
-
-Para la decisión de control (futuro `autopilot.py`, que vive en el backend)
-el tramo WebRTC **no** cuenta — solo el camino cámara → decisión → drone:
-
-| Tramo | Latencia | Fuente |
-|-------|----------|--------|
-| Cámara FPV + VTX analógico | ~5 ms | despreciable |
-| EasyCap (digitalización NTSC) | ~50–100 ms | `CAPTURE_BASE_MS = 75` |
-| Pipeline de visión (según etapas) | 0–240 ms | medido, `latency.pipeline_ms` |
-| Edad del resultado al decidir | 0–500 ms | medido, `latency.result_age_ms` |
-| Decisión + inyección CRSF + uplink ELRS + respuesta del drone | ~200–300 ms | `reaction_time_ms = 250` (estimado, pendiente de medir en Fase 3) |
-
-Total con visión activa: **~330–700 ms** desde que algo aparece delante de
-la cámara hasta que el drone reacciona. Esa cifra es la que gobierna a qué
-velocidad es seguro volar.
-
-## 4. LatencyGovernor — cómo se comportará el autopilot con visión activa
-
-**Principio: el drone no debe volar más rápido de lo que ve.** Si un
-obstáculo aparece a la distancia de seguridad `d`, el sistema tiene que
-percibirlo y reaccionar antes de recorrer `d`:
-
-```
-v_max = safety_distance_m / (t_captura + t_pipeline + t_edad + t_reacción)
+```http
+GET /api/vision/config
+POST /api/vision/config
 ```
 
-Con los valores por defecto (`d = 3 m`, visión a ~440 ms totales) salen
-**~6.8 m/s**; si se enciende también la segmentación y el total sube a
-~600 ms, baja a ~5 m/s. Encender etapas de visión **reduce automáticamente
-la velocidad recomendada** — ese es el compromiso que pedía el diseño: más
-percepción a cambio de volar más despacio.
+El POST acepta un objeto parcial, por ejemplo:
 
-Modos que expone `GET /api/vision/status → governor`:
+```json
+{
+  "pipeline_mode": "segment",
+  "imgsz": 416,
+  "enabled_classes": ["person", "cow"],
+  "confidence": {"default": 0.45, "per_class": {"cow": 0.4}}
+}
+```
 
-| Modo | Condición | Comportamiento previsto del autopilot |
-|------|-----------|----------------------------------------|
-| `off` | Ninguna etapa activa | La visión no gobierna: vuela con límites de telemetría solamente (los modos que requieran visión — Follow — no disponibles) |
-| `warming_up` | Etapas activas, sin resultados aún | No despegar / no iniciar misión |
-| `active` | Resultados frescos | Limitar velocidad comandada a `max_speed_ms` |
-| `stale` | Último resultado > `stale_after_ms` (1.5 s) | **Hover inmediato** hasta recuperar visión; si persiste, Return-to-safe |
+También acepta la estructura completa del archivo. `imgsz` escalar afecta al
+modo seleccionado; usar `{ "detect": 416, "segment": 640 }` para ambos.
+`profile: "analog"` aplica 416/416; `profile: "digital"` aplica 640/640. Estos
+presets son explícitos e independientes del perfil de captura, para permitir
+comparaciones controladas. `imgsz` explícito tiene prioridad sobre el preset.
+Las clases se resuelven desde `model.names`; nombres desconocidos impiden
+activar el modelo. Lista vacía deshabilita todas las clases y omite inferencia; el governor queda
+en warming_up (velocidad 0), sin publicar percepción fresca artificial.
+Los thresholds por clase se reemplazan como un mapa completo; `{}` los limpia.
+Inferencia usa el mínimo threshold y luego filtra cada resultado sin redondear
+su confidence. Filtrar clases no reduce el backbone de la red.
 
-Parámetros ajustables en runtime (`POST /api/vision/governor`):
-`safety_distance_m` (default 3.0 — interior/whoop) y `reaction_time_ms`
-(default 250 — re-medir cuando exista la inyección de comandos de Fase 3).
-Techo y piso: 8 m/s (límite físico aprox. del Mobula8) y 0.3 m/s (por
-debajo, hover).
+La carga y warm-up se serializan con inferencia. Un candidato solo sustituye
+el modelo anterior tras validar y guardar configuración correctamente. Los
+cambios descartan resultados y métricas previas. Puede haber dos modelos
+residentes durante la preparación del candidato; solo uno recibe cada frame.
+Después del cambio se liberan las referencias del anterior (el allocator de
+PyTorch puede conservar memoria reservada). Un fallo mantiene el modelo y el
+archivo anteriores. No se promete una conmutación sin pausa de inferencia.
 
-### Reglas de integración para `autopilot.py` (Fase 4)
+`overlay.boxes`, `overlay.labels` y `overlay.masks` controlan la visualización.
+`benchmark.collect_metrics` activa una ventana de percentiles; por defecto
+30 segundos y máximo 10.000 muestras. Configuraciones inválidas devuelven 422,
+fallos de carga/persistencia 503. En OFF, validar nombres contra pesos se
+pospone hasta la siguiente activación.
 
-1. **La telemetría manda, la visión es señal lenta.** El lazo rápido
-   (actitud/hover, ~30–60 ms de latencia CRSF) se cierra con telemetría; la
-   visión solo aporta objetivos y vetos a su propio ritmo (decisión ya
-   registrada en `ARCHITECTURE.md` §7).
-2. Leer `governor.max_speed_ms` **antes de cada comando de velocidad** y
-   saturar la consigna con él.
-3. Tratar `stale` como evento de seguridad (hover), no como dato viejo
-   utilizable.
-4. **Degradar antes que perder frescura**: si `vision_fps` cae por debajo
-   de ~2, preferir bajar `imgsz` o apagar la segmentación (recuperando
-   velocidad de inferencia) antes que aceptar resultados stale.
-5. Registrar en el log de decisiones (`safety` del roadmap) el modo del
-   governor vigente en cada comando emitido.
+## API y UI
 
-### Alternativas consideradas (y por qué no ahora)
+El panel AI aplica un único modo y permite editar modelo por tarea, tamaños,
+clases, confidence global y thresholds. Muestra modo/modelo efectivos, latencia
+de inferencia, pipeline, edad de resultado, FPS, detecciones y Vmax.
 
-- **Compensación predictiva** (extrapolar posición de detecciones con un
-  filtro Kalman usando la actitud CRSF): reduce el efecto de la latencia
-  sin bajar la velocidad, pero exige estimación de ego-movimiento fiable.
-  Candidata para Fase 4 una vez haya datos de vuelo reales; el límite de
-  velocidad es la versión conservadora y verificable hoy.
-- **Inferencia en GPU/Jetson**: ataca la causa raíz (t_pipeline) — ya está
-  en el roadmap como salida prevista si la CPU se queda corta.
-- **Post-proceso offline** de la grabación MP4: sin restricción de latencia,
-  útil para análisis, no para control. Sigue disponible por diseño (la
-  grabación guarda el frame limpio, sin overlay).
+`GET /api/vision/status` expone esos valores en el nivel superior; conserva
+`detection`, `segmentation`, `latency`, `roi` y `governor`. `metrics` incluye
+p50/p95 de inferencia y pipeline. Edad se mide desde finalización del resultado;
+el tiempo de pipeline se agrega por separado al cálculo del governor.
 
-## 5. Endpoints
+Rutas heredadas `/api/yolo/config` y `/api/segmentation/config` seleccionan
+respectivamente DETECT y SEGMENT; `enabled:false` selecciona OFF. Ya no se
+pueden combinar. `focus_mode` se acepta como compatibilidad de entrada, pero
+no cambia el frame ni ejecuta un segundo modelo. La respuesta de configuración
+es ahora el esquema unificado; migrar clientes que dependían de `enabled` en
+la respuesta. `/api/vision/models` lista modelos locales por convención de
+nombre, pero cualquier nombre explícito válido puede cargarse.
 
-| Método | Endpoint | Descripción |
-|--------|----------|-------------|
-| `GET` | `/api/vision/status` | Estado completo: etapas, latencias por etapa, FPS de visión, governor |
-| `GET` | `/api/vision/models` | Modelos disponibles por etapa (defaults + `models/`) |
-| `POST` | `/api/segmentation/config` | `enabled`, `model`, `confidence`, `focus_mode` (`mask`/`overlay`), `imgsz` |
-| `POST` | `/api/yolo/config` | `enabled`, `model`, `confidence`, `imgsz` |
-| `POST` | `/api/vision/governor` | `safety_distance_m`, `reaction_time_ms` |
-| `GET` | `/api/yolo/status`, `/api/yolo/models` | Rutas históricas del detector (compatibilidad) |
+## LatencyGovernor
 
-## 6. Pendiente de validación con hardware real
+Se conserva la política previa:
 
-- FPS de visión alcanzables con el stream EasyCap real (las cifras de este
-  documento vienen de frames sintéticos en el laptop de desarrollo).
-- Si el modo `mask` reduce falsos positivos en video analógico real o si un
-  detector fine-tuneado solo (ver `YOLO_FINETUNING.md`) hace innecesaria la
-  etapa de segmentación.
-- `reaction_time_ms` real, medible solo cuando exista la inyección de
-  comandos (Fase 3).
+- OFF o ROI vacía: sin gobierno por visión.
+- Visión solicitada sin resultado: warming_up, velocidad recomendada 0.
+- Resultado de más de 1500 ms: stale, velocidad recomendada 0 (HOVER).
+- Resultado fresco: `v_max = distancia / (75 ms + pipeline + edad + reacción)`.
 
-## 7. Grilla de área de inferencia
+Distancia por defecto 3 m, reacción 250 ms, techo 8 m/s y piso histórico 0.3 m/s.
+El governor informa una recomendación; no conecta visión con inyección RC.
 
-En el reproductor, abrir **Área IA**. La grilla tiene 12 columnas y 8 filas:
-las celdas activas reciben detección y segmentación; las rayadas en rojo
-quedan excluidas. Clic o arrastre alterna/pinta celdas. También se pueden
-recorrer con Tab y alternar con Espacio. **Todo**, **Nada**, **Aplicar** y
-**Cancelar** permiten editar sin cambiar el área en ejecución hasta aplicar.
-Una selección vacía pausa la inferencia de ambas etapas.
+## Validación
 
-La grilla sigue los límites del video, no las bandas negras del reproductor.
-Las coordenadas proporcionales funcionan con NTSC/PAL, HD, 1080p y cambios de
-proporción de visualización. Las grabaciones conservan la imagen completa.
-La selección se guarda en `backend/vision_roi.json` (configuración local,
-excluida de Git), compartida por ambas etapas y los clientes del servidor.
-También se conserva al cambiar de cámara: revisar el área al cambiar la
-posición de cámara o la geometría de las hélices. Inicialmente todo está
-seleccionado. Una configuración ilegible pausa la inferencia y registra
-el error, evitando ampliar silenciosamente el área.
+```bash
+python -m unittest discover -s tests -p 'test_*.py'
+node --test tests/*.mjs
+python scripts/smoke_yolo26.py
+```
 
-Antes de inferir se recorta el rectángulo que contiene las celdas activas y
-se ponen a negro los huecos/celdas excluidas. Ambos modelos reciben esa
-imagen; no se ejecuta un modelo por celda. La segmentación y su dilatación
-se limitan a la selección. Las detecciones necesitan su centro dentro del
-área y al menos la mitad de su caja sobre píxeles seleccionados. Las cajas
-y contornos se trasladan a coordenadas del frame original; el dibujo se
-limita al área seleccionada. El HUD de latencia sigue siendo global.
-
-Cambiar de selección invalida el resultado publicado y descarta los
-resultados en vuelo calculados con la revisión anterior. El estado del
-pipeline y `/api/yolo/status` muestran las detecciones filtradas y con
-coordenadas restauradas, no las detecciones intermedias del recorte.
-
-API: `GET /api/vision/roi` devuelve `rows`, `cols`, `cells`,
-`selected_count`, `total_count` y `revision`. `POST /api/vision/roi` recibe
-`{"cells": [true, false, ...]}` con exactamente 96 booleanos, en orden por
-filas desde la esquina superior izquierda. Un fallo al persistir responde
-500 y conserva la selección anterior. `/api/vision/status` incluye `roi`.
-
-Validación: tests de máscara, recorte, traslación, persistencia, vaciado,
-resultados en vuelo, API y edición del frontend. Prueba de navegador con
-video sintético y selección de las esquinas inferiores. Falta validar el
-contorno elegido sobre video real del drone: la grilla no reconoce las
-hélices automáticamente ni garantiza eliminar todos los falsos positivos.
-La máscara puede alterar el comportamiento del modelo cerca de sus bordes;
-la ganancia de velocidad depende del recorte y no del número de celdas
-excluidas por sí solo.
+El smoke real descarga pesos si hacen falta y exige cajas y máscaras no vacías
+sobre el asset `bus.jpg`. CI incluye estas comprobaciones con Ultralytics 8.4.0;
+la ejecución remota de CI requiere publicar la rama. Ver
+[benchmark reproducible](../benchmarks/README.md) e
+[informe de migración](YOLO26_MIGRATION_REPORT.md). No dar por aceptada la
+calidad de campo ni la latencia con WebRTC y grabación reales hasta medirlas.

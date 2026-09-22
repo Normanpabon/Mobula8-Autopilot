@@ -16,7 +16,7 @@ física y conserva los bloqueos descritos en la revisión.
 |-----------|-----------|
 | `docs/ARCHITECTURE.md` | Resumen arquitectónico: módulos, librerías y su propósito, flujo de datos — **empezar aquí si eres nuevo en el proyecto** |
 | `docs/SETUP.md` | Instalación del entorno (conda, CPU/GPU) |
-| `docs/VISION_PIPELINE.md` | Pipeline de visión: cascada segmentación + YOLO, latencias y política del governor |
+| `docs/VISION_PIPELINE.md` | Pipeline YOLO26 de un modelo, ROI, latencias y governor |
 | `docs/YOLO_FINETUNING.md` | Guía de fine-tuning: reducir tamaño y latencia del modelo |
 | `docs/RC_INJECTION.md` | Inyección de comandos RC (Fase 3): diseño, deadman y validación de protocolo |
 | `docs/PLAN_ACCION.md` | Pendientes priorizados, dependencias y criterios de cierre para video y control Linux |
@@ -41,8 +41,8 @@ accesible desde cualquier dispositivo en la red local.
 - **Captura telemetría CRSF** directamente desde el control remoto via USB
 - **Visualiza en tiempo real**: horizonte artificial, batería, señal RF, modos de vuelo
 - **Video FPV en el navegador**: stream WebRTC de baja latencia desde la capturadora USB
-- **Visión por computadora**: cascada opcional de segmentación + detección
-  YOLO sobre el feed FPV, con etapas que se encienden/apagan por separado.
+- **Visión por computadora**: modos excluyentes OFF / DETECT / SEGMENT con
+  YOLO26 sobre el feed FPV; cajas y máscaras salen de una única inferencia.
   La inferencia corre desacoplada del stream (el video no pierde FPS) y el
   overlay muestra detecciones, latencia por etapa y la velocidad máxima
   recomendada que calcula el `LatencyGovernor`
@@ -60,7 +60,7 @@ accesible desde cualquier dispositivo en la red local.
 ### Stack técnico
 - **Backend**: Python 3.11 / FastAPI (lifespan) / WebSocket / pySerial
 - **Video**: OpenCV (captura Windows MSMF/DSHOW; Linux V4L2/CAP_ANY) + aiortc (WebRTC) + PyAV
-- **Visión**: ultralytics YOLOv8 — detección + segmentación (opcional)
+- **Visión**: Ultralytics YOLO26 — detección o segmentación con cajas
 - **Frontend**: Vanilla JavaScript (sin dependencias npm)
 - **Protocolo**: CRSF sobre USB Serial (EdgeTX Telem Mirror, sync byte `0xEA`)
 - **Almacenamiento**: JSON plano en disco (`logs/`), video MP4 en `logs/video/`
@@ -76,9 +76,9 @@ backend/                     ← Código Python
 ├── elrs_backend.py          ← Servidor principal (FastAPI, EJECUTAR ESTE)
 ├── session_manager.py       ← Gestión de sesiones de vuelo (JSON)
 ├── video_streamer.py        ← Captura USB + WebRTC + grabación MP4
-├── vision_pipeline.py       ← Cascada de visión + LatencyGovernor
-├── yolo_processor.py        ← Etapa de detección YOLO
-├── segmentation_processor.py← Etapa de segmentación (opcional, previa a YOLO)
+├── vision_pipeline.py       ← Worker de visión + LatencyGovernor
+├── vision_model.py          ← Modelo único de detección o segmentación
+├── vision_config.py         ← Configuración validada por modo
 ├── command_injector.py      ← Inyección RC (CRSF 0x16 + deadman, Fase 3)
 ├── video_calibrate.py       ← Herramienta standalone de calibración de imagen
 └── video_config.json        ← Configuración de imagen (brillo, WB, etc.)
@@ -107,7 +107,7 @@ logs/
 
 Pipeline de video: `captura (OpenCV) → correcciones (WB/gamma) → overlay de
 visión → WebRTC (aiortc) / grabación MP4`. La inferencia
-(`[segmentación] → [YOLO]`) corre en un loop desacoplado que publica
+(`OFF / DETECT / SEGMENT`) corre en un loop desacoplado que publica
 resultados; el stream solo dibuja el último publicado. Diagramas completos
 en `docs/ARCHITECTURE.md` y `docs/VISION_PIPELINE.md`.
 
@@ -253,24 +253,17 @@ El balance de blancos es por software (el driver de la EasyCap no acepta
 
 ## 🧠 Panel AI (visión por computadora)
 
-El panel **AI** del player controla las dos etapas del pipeline de visión,
-cada una con su toggle independiente:
+El panel **AI** selecciona un modo exclusivo: **OFF**, **DETECT** (`yolo26n.pt`)
+o **SEGMENT** (`yolo26n-seg.pt`, cajas y máscaras en una sola inferencia).
+Permite configurar modelos propios, imgsz por tarea, clases por nombre,
+confidence global y thresholds por clase. La configuración se guarda en
+`backend/config/vision.json` y se carga al iniciar la captura.
 
-- **DETECT** (YOLO): modelo de detección (`yolov8n/s/m` o los `.pt`/`.onnx`
-  propios colocados en `models/`), slider de confidence.
-- **SEGMENT**: modelo de segmentación (`yolov8n-seg` o propios con `-seg` en
-  el nombre) y modo de foco: `mask` suprime el fondo antes del detector
-  (cascada), `overlay` solo dibuja los contornos.
-
-La cabecera del panel muestra en vivo: FPS de visión, detecciones, latencia
-del pipeline (ms) y **Vmax** — la velocidad máxima recomendada que calcula el
-`LatencyGovernor` a partir de la latencia total (más etapas encendidas →
-más latencia → menor Vmax). El mismo HUD se dibuja sobre el stream. Detalles
-y política completa en `docs/VISION_PIPELINE.md`; cómo entrenar y optimizar
-modelos propios en `docs/YOLO_FINETUNING.md`.
-
-La primera activación de un modelo lo descarga automáticamente (~6 MB) si no
-está en `models/`.
+Muestra FPS, detecciones, modelo efectivo, inferencia, pipeline, edad del
+resultado y **Vmax**. El governor conserva `stale → HOVER`. Los modelos locales
+van en `models/`; Ultralytics descarga los oficiales si no están disponibles.
+Detalles en [VISION_PIPELINE.md](docs/VISION_PIPELINE.md), resultados y pendientes
+en [YOLO26_MIGRATION_REPORT.md](docs/YOLO26_MIGRATION_REPORT.md).
 
 ---
 
@@ -413,10 +406,11 @@ Cada sesión guardada en `logs/session_YYYYMMDD_HHMMSS.json`:
 
 | Método | Endpoint | Descripción |
 |--------|----------|-------------|
-| `GET` | `/api/vision/status` | Estado completo: etapas, latencias por etapa, FPS de visión, governor |
+| `GET` | `/api/vision/status` | Modo/modelo, clases, métricas reales, ROI y governor |
+| `GET/POST` | `/api/vision/config` | Configuración unificada persistente de visión |
 | `GET` | `/api/vision/models` | Modelos disponibles por etapa (defaults + `models/`) |
-| `POST` | `/api/segmentation/config` | Etapa de segmentación: `enabled`, `model`, `confidence`, `focus_mode` (`mask`/`overlay`), `imgsz` |
-| `POST` | `/api/yolo/config` | Etapa de detección: `enabled`, `model`, `confidence`, `imgsz` |
+| `POST` | `/api/segmentation/config` | Compatibilidad: selecciona SEGMENT u OFF; nunca se combina con DETECT |
+| `POST` | `/api/yolo/config` | Compatibilidad: selecciona DETECT u OFF |
 | `POST` | `/api/vision/governor` | Política de latencia: `safety_distance_m`, `reaction_time_ms` |
 | `GET` | `/api/yolo/status` | Estado del detector (compatibilidad) |
 | `GET` | `/api/yolo/models` | Modelos de detección (compatibilidad) |
@@ -528,7 +522,7 @@ python -m serial.tools.list_ports
 
 ### El panel AI muestra "Vmax HOVER" (modo stale)
 - La inferencia no está publicando resultados frescos (>1.5 s). Causas
-  típicas: modelo demasiado pesado para la CPU (usar yolov8n, bajar
+  típicas: modelo demasiado pesado para la CPU (usar yolo26n, bajar
   `imgsz`), o la captura se detuvo. Ver `latency.vision_fps` en
   `GET /api/vision/status`.
 
@@ -542,9 +536,9 @@ python -m serial.tools.list_ports
 │   ├── elrs_backend.py      ← Servidor principal (EJECUTAR ESTE)
 │   ├── session_manager.py   ← Módulo de sesiones (no ejecutar solo)
 │   ├── video_streamer.py    ← Video FPV: captura + WebRTC + grabación
-│   ├── vision_pipeline.py   ← Cascada de visión + LatencyGovernor
-│   ├── yolo_processor.py    ← Etapa de detección YOLO
-│   ├── segmentation_processor.py ← Etapa de segmentación (opcional)
+│   ├── vision_pipeline.py   ← Worker de visión + LatencyGovernor
+│   ├── vision_model.py    ← Etapa de detección YOLO
+│   ├── vision_config.py          ← Configuración validada de visión
 │   ├── command_injector.py  ← Inyección RC + deadman (Fase 3)
 │   ├── video_calibrate.py   ← Calibración de imagen (standalone)
 │   └── video_config.json    ← Config de imagen generada por la calibración

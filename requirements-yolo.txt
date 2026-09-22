@@ -2,7 +2,8 @@
 # Dependencias opcionales para el pipeline de visión (Fase 2)
 # Instalar con:  pip install -r requirements-yolo.txt
 #
-# Por defecto instala PyTorch CPU.
+# Para CPU, instalar primero (pip puede seleccionar CUDA desde PyPI):
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
 # Para GPU con CUDA 12.1, instalar torch manualmente ANTES:
 #   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
 # Para GPU con CUDA 11.8:
@@ -14,4 +15,4 @@
 #   pip install openvino            # cuantización INT8 en CPU Intel
 # ─────────────────────────────────────────────────────────────
 
-ultralytics>=8.2.0
+ultralytics==8.4.0  # YOLO26 compatibility target; real-weight smoke in CI

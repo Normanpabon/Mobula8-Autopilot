@@ -724,8 +724,8 @@ class VideoStreamer:
 
     @property
     def yolo(self):
-        """Alias de compatibilidad (endpoints /api/yolo/*): el detector del pipeline."""
-        return self.vision.detector if self.vision else None
+        """Alias de compatibilidad (endpoints /api/yolo/*): el modelo activo del pipeline."""
+        return self.vision.model if self.vision else None
 
     async def _get_display_frame(self):
         """Frame getter para WebRTC: captura → overlay de visión (no bloqueante)."""

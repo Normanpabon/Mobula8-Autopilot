@@ -1,0 +1,6 @@
+{
+  "models": [
+    {"name": "yolo26n.pt", "task": "detect", "source": "ultralytics", "dataset": "COCO", "classes": 80},
+    {"name": "yolo26n-seg.pt", "task": "segment", "source": "ultralytics", "dataset": "COCO", "classes": 80}
+  ]
+}

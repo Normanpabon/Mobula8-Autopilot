@@ -306,7 +306,7 @@
             <!-- AI Vision Panel (collapsible): segmentación + detección YOLO -->
             <div class="yolo-panel" id="yoloPanel">
                 <div class="yolo-header">
-                    <span class="yolo-title">AI VISION — SEG + YOLO</span>
+                    <span class="yolo-title">AI VISION — YOLO26</span>
                     <span class="yolo-stats" id="yoloStats">
                         <span id="yoloFPS">--</span> FPS &nbsp;|&nbsp;
                         <span id="yoloCount">0</span> det &nbsp;|&nbsp;
@@ -315,36 +315,18 @@
                     </span>
                 </div>
                 <div class="vs-row">
-                    <span class="vs-label">DETECT</span>
-                    <select id="yoloModel" class="vc-select" style="flex:1;">
-                        <option value="yolov8n.pt">yolov8n (fast)</option>
-                        <option value="yolov8s.pt">yolov8s (balanced)</option>
-                        <option value="yolov8m.pt">yolov8m (accurate)</option>
-                    </select>
+                    <label for="visionMode">VISION MODE</label>
+                    <select id="visionMode" class="vc-select"><option value="off">OFF</option><option value="detect">DETECT</option><option value="segment">SEGMENT</option></select>
+                    <button id="visionApply" class="vc-btn vc-btn-primary" onclick="applyVision()">Aplicar</button>
                 </div>
-                <div class="vs-row">
-                    <span class="vs-label">CONFIDENCE</span>
-                    <input type="range" class="vs-slider" id="yoloConf" min="10" max="95" value="50"
-                           oninput="vsUpdateValue(this,'yoloConfVal')">
-                    <span class="vs-value" id="yoloConfVal">50</span>
-                </div>
-                <div class="vs-row">
-                    <span class="vs-label">SEGMENT</span>
-                    <select id="segModel" class="vc-select" style="flex:1;">
-                        <option value="yolov8n-seg.pt">yolov8n-seg (fast)</option>
-                        <option value="yolov8s-seg.pt">yolov8s-seg (accurate)</option>
-                    </select>
-                    <select id="segFocus" class="vc-select" title="mask: suprime el fondo antes del detector | overlay: solo visual">
-                        <option value="mask">mask</option>
-                        <option value="overlay">overlay</option>
-                    </select>
-                </div>
-                <div class="vs-row" style="justify-content:flex-end;gap:8px;padding-top:4px;">
-                    <button class="vc-btn vc-btn-primary" id="btnSegToggle"
-                            onclick="segToggle()">▶ Enable SEG</button>
-                    <button class="vc-btn vc-btn-primary" id="btnYoloToggle"
-                            onclick="yoloToggle()">▶ Enable DETECT</button>
-                </div>
+                <div class="vs-row"><label for="visionDetectModel">Detector</label><input id="visionDetectModel" class="vc-select" value="yolo26n.pt"></div>
+                <div class="vs-row"><label for="visionSegmentModel">Segmentador</label><input id="visionSegmentModel" class="vc-select" value="yolo26n-seg.pt"></div>
+                <div class="vs-row"><label for="visionDetectSize">imgsz DETECT</label><input id="visionDetectSize" type="number" min="32" max="2048" value="640"><label for="visionSegmentSize">SEGMENT</label><input id="visionSegmentSize" type="number" min="32" max="2048" value="416"></div>
+                <div class="vs-row"><label for="visionConfidence">Confidence</label><input id="visionConfidence" type="number" min="0" max="1" step="0.01" value="0.45"></div>
+                <div class="vs-row"><label for="visionClasses">Clases (separadas por coma)</label><input id="visionClasses" style="flex:1;min-width:0" placeholder="person, car, cow"></div>
+                <div class="vs-row"><label for="visionThresholds">Thresholds por clase (JSON)</label><input id="visionThresholds" style="flex:1;min-width:0" value='{}'></div>
+                <div id="visionDetails" class="yolo-stats"></div>
+                <div id="visionMessage" role="status" aria-live="polite"></div>
             </div>
 
             <!-- RC Inject Panel (collapsible) — Fase 3, pendiente validación de protocolo -->
@@ -600,107 +582,70 @@
         }
 
         // ── Video Settings ──────────────────────────
-        // ── AI Vision panel (segmentación + detección) ──
-        let yoloEnabled     = false;
-        let segEnabled      = false;
+        // One mode is applied atomically to the unified vision worker.
         let visionStatTimer = null;
-
-        window.toggleYoloPanel = function () {
-            const panel = document.getElementById('yoloPanel');
-            const isOpen = panel.classList.toggle('open');
-            // Solo un panel abierto a la vez
-            if (isOpen) {
-                document.getElementById('videoSettingsPanel').classList.remove('open');
-                document.getElementById('rcPanel').classList.remove('open');
-                loadVisionModels();
+        const visionField = id => document.getElementById(id);
+        window.toggleYoloPanel = async function () {
+            const open = visionField('yoloPanel').classList.toggle('open');
+            if (open) {
+                visionField('videoSettingsPanel').classList.remove('open');
+                visionField('rcPanel').classList.remove('open');
+                await loadVisionConfig();
+                await pollVisionStats();
             }
         };
-
-        function fillModelSelect(selId, models, preferred) {
-            const all = [...new Set([...models.defaults, ...models.custom])];
-            document.getElementById(selId).innerHTML = all.map(m =>
-                `<option value="${m}"${m === preferred ? ' selected' : ''}>${m}</option>`
-            ).join('');
-        }
-
-        async function loadVisionModels() {
+        async function loadVisionConfig() {
             try {
-                const r = await fetch('/api/vision/models');
-                if (!r.ok) return;
-                const data = await r.json();
-                fillModelSelect('yoloModel', data.detection,    'yolov8n.pt');
-                fillModelSelect('segModel',  data.segmentation, 'yolov8n-seg.pt');
-            } catch (_) {}
+                const r = await fetch('/api/vision/config');
+                if (!r.ok) throw new Error('No se pudo leer la configuración');
+                const c = await r.json();
+                visionField('visionMode').value = c.pipeline_mode;
+                visionField('visionDetectModel').value = c.models.detect;
+                visionField('visionSegmentModel').value = c.models.segment;
+                visionField('visionDetectSize').value = c.imgsz.detect;
+                visionField('visionSegmentSize').value = c.imgsz.segment;
+                visionField('visionConfidence').value = c.confidence.default;
+                visionField('visionClasses').value = c.coco_classes.enabled.join(', ');
+                visionField('visionThresholds').value = JSON.stringify(c.confidence.per_class);
+            } catch (e) { visionField('visionMessage').textContent = e.message; }
         }
-
-        function updateVisionUI() {
-            const anyOn = yoloEnabled || segEnabled;
-            document.getElementById('yoloBadge').classList.toggle('visible', anyOn);
-            if (anyOn && !visionStatTimer) {
-                visionStatTimer = setInterval(pollVisionStats, 1500);
-            } else if (!anyOn && visionStatTimer) {
-                clearInterval(visionStatTimer); visionStatTimer = null;
-            }
-        }
-
-        async function toggleStage(btn, url, body, enabling, labelOn, labelOff) {
-            btn.textContent = '⏳ Loading...';
-            btn.disabled    = true;
-            let ok = false;
+        window.applyVision = async function () {
+            const button = visionField('visionApply');
+            button.disabled = true;
+            visionField('visionMessage').textContent = 'Aplicando configuración…';
             try {
-                const r    = await fetch(url, {
-                    method: 'POST', headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(body),
-                });
-                const data = await r.json();
-                ok = r.ok && data.enabled === enabling;
-                if (!ok) console.error('[Vision]', data.error || 'Error');
-            } catch (e) {
-                console.error('[Vision]', e);
-            }
-            const on = enabling ? ok : !ok;
-            btn.textContent = on ? labelOn : labelOff;
-            btn.classList.toggle('active', on);
-            btn.disabled = false;
-            return ok;
-        }
-
-        window.yoloToggle = async function () {
-            const btn   = document.getElementById('btnYoloToggle');
-            const model = document.getElementById('yoloModel').value;
-            const conf  = parseInt(document.getElementById('yoloConf').value) / 100;
-            const ok = await toggleStage(btn, '/api/yolo/config',
-                { enabled: !yoloEnabled, model, confidence: conf },
-                !yoloEnabled, '■ Disable DETECT', '▶ Enable DETECT');
-            if (ok) yoloEnabled = !yoloEnabled;
-            updateVisionUI();
+                const body = {
+                    pipeline_mode: visionField('visionMode').value,
+                    models: {detect: visionField('visionDetectModel').value, segment: visionField('visionSegmentModel').value},
+                    imgsz: {detect: Number(visionField('visionDetectSize').value), segment: Number(visionField('visionSegmentSize').value)},
+                    enabled_classes: visionField('visionClasses').value.split(',').map(s => s.trim()).filter(Boolean),
+                    confidence: {default: Number(visionField('visionConfidence').value), per_class: JSON.parse(visionField('visionThresholds').value)}
+                };
+                const r = await fetch('/api/vision/config', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
+                const result = await r.json();
+                if (!r.ok) throw new Error(result.error || 'No se pudo aplicar la configuración');
+                visionField('visionMessage').textContent = 'Configuración aplicada';
+                await pollVisionStats();
+            } catch (e) { visionField('visionMessage').textContent = e.message; }
+            finally { button.disabled = false; }
         };
-
-        window.segToggle = async function () {
-            const btn   = document.getElementById('btnSegToggle');
-            const model = document.getElementById('segModel').value;
-            const focus = document.getElementById('segFocus').value;
-            const ok = await toggleStage(btn, '/api/segmentation/config',
-                { enabled: !segEnabled, model, focus_mode: focus },
-                !segEnabled, '■ Disable SEG', '▶ Enable SEG');
-            if (ok) segEnabled = !segEnabled;
-            updateVisionUI();
-        };
-
         async function pollVisionStats() {
             try {
-                const r    = await fetch('/api/vision/status');
+                const r = await fetch('/api/vision/status');
+                if (!r.ok) return;
                 const data = await r.json();
-                if (!data.active) return;
-                document.getElementById('yoloFPS').textContent   = data.latency?.vision_fps ?? '--';
-                document.getElementById('yoloCount').textContent = data.detection?.detection_count ?? 0;
-                document.getElementById('visionLat').textContent = Math.round(data.latency?.pipeline_ms ?? 0);
+                visionField('yoloBadge').classList.toggle('visible', Boolean(data.active));
+                visionField('yoloFPS').textContent = data.vision_fps ?? '--';
+                visionField('yoloCount').textContent = data.detection?.detection_count ?? 0;
+                visionField('visionLat').textContent = data.pipeline_ms ?? '--';
                 const gov = data.governor || {};
-                document.getElementById('visionVmax').textContent =
-                    gov.mode === 'active' ? gov.max_speed_ms.toFixed(1) :
-                    gov.mode === 'stale'  ? 'HOVER' : '--';
+                visionField('visionVmax').textContent = gov.mode === 'active' ? gov.max_speed_ms.toFixed(1) : ['stale','warming_up'].includes(gov.mode) ? 'HOVER' : '--';
+                visionField('visionDetails').textContent = `${data.mode ?? 'off'} · ${data.model ?? '—'} · imgsz ${data.imgsz ?? '—'} · inferencia ${(data.inference_ms ?? 0).toFixed(1)} ms · edad ${data.result_age_ms ?? '—'} ms · clases ${(data.enabled_classes ?? []).join(', ')} · confidence ${data.confidence?.default ?? '—'} · thresholds ${JSON.stringify(data.confidence?.per_class ?? {})}`;
+                if (data.error) visionField('visionMessage').textContent = data.error;
             } catch (_) {}
         }
+        visionStatTimer = setInterval(pollVisionStats, 1500);
+        pollVisionStats();
 
         window.toggleVideoSettings = function () {
             const panel = document.getElementById('videoSettingsPanel');

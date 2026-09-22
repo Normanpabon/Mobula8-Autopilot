@@ -1,4 +1,13 @@
 > Las fases pendientes (Fase 3 — inyección EdgeTX, Fase 4 — vuelo autónomo)
+
+## Sin publicar — migración YOLO26
+
+- Modos exclusivos OFF/DETECT/SEGMENT; cajas y máscaras en una inferencia.
+- Configuración persistente de modelos, clases, thresholds, tamaños y métricas.
+- API y panel AI unificados, preservando ROI y governor stale → HOVER.
+- Ultralytics 8.4.0, tests, smoke real y benchmark reproducible.
+- Aceptación de campo pendiente; ver `docs/YOLO26_MIGRATION_REPORT.md`.
+
 > y el resto del trabajo futuro viven ahora en `docs/ROADMAP.md`.
 
 ## [2.7.1] — 2026-09-21

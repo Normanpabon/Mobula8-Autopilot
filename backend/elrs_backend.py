@@ -194,15 +194,15 @@ class VideoConfigRequest(BaseModel):
 
 class YOLOConfigRequest(BaseModel):
     enabled:    bool  = False
-    model:      str   = "yolov8n.pt"
+    model:      str   = "yolo26n.pt"
     confidence: float = 0.5
     imgsz:      int   = 640     # 416/320 reducen latencia (docs/YOLO_FINETUNING.md)
 
 class SegmentationConfigRequest(BaseModel):
     enabled:    bool  = False
-    model:      str   = "yolov8n-seg.pt"
+    model:      str   = "yolo26n-seg.pt"
     confidence: float = 0.35
-    focus_mode: str   = "mask"  # "mask": suprime fondo antes del detector | "overlay": solo visual
+    focus_mode: str   = "mask"  # Compatibilidad; no aplica preprocesamiento SEG→DET
     imgsz:      int   = 416
 
 class VisionROIRequest(BaseModel):
@@ -473,7 +473,7 @@ async def stop_recording():
     return JSONResponse({"recording": False, "saved": path, "error": video.recorder.error})
 
 # ──────────────────────────────────────────────────────────────
-# Vision routes (pipeline: segmentación + detección YOLO + governor)
+# Vision routes (OFF / DETECT / SEGMENT + governor)
 # ──────────────────────────────────────────────────────────────
 @app.get("/api/vision/status")
 async def get_vision_status():
@@ -500,39 +500,48 @@ async def update_vision_roi(req: VisionROIRequest):
 
 @app.get("/api/vision/models")
 async def list_vision_models():
-    det_defaults = ["yolov8n.pt", "yolov8s.pt", "yolov8m.pt"]
-    seg_defaults = ["yolov8n-seg.pt", "yolov8s-seg.pt"]
+    det_defaults = ["yolo26n.pt", "yolo26s.pt", "yolo26m.pt"]
+    seg_defaults = ["yolo26n-seg.pt", "yolo26s-seg.pt"]
     if not VIDEO_AVAILABLE or not video or not video.vision:
         return JSONResponse({"detection":    {"custom": [], "defaults": det_defaults},
                              "segmentation": {"custom": [], "defaults": seg_defaults}})
-    from yolo_processor import YOLOProcessor
-    from segmentation_processor import SegmentationProcessor
+    from vision_model import VisionModel
     return JSONResponse({
-        "detection":    {"custom": YOLOProcessor.list_local_models(),
+        "detection":    {"custom": VisionModel.list_local_models("detect"),
                          "defaults": det_defaults},
-        "segmentation": {"custom": SegmentationProcessor.list_local_models(),
+        "segmentation": {"custom": VisionModel.list_local_models("segment"),
                          "defaults": seg_defaults},
     })
 
-@app.post("/api/segmentation/config")
-async def update_segmentation_config(req: SegmentationConfigRequest):
+@app.get("/api/vision/config")
+async def get_vision_config():
     if not VIDEO_AVAILABLE or not video or not video.vision:
         return JSONResponse({"error": "Visión no disponible"}, status_code=503)
-    seg = video.vision.segmenter
-    if not seg.is_available():
-        return JSONResponse({"error": "ultralytics no instalado — pip install ultralytics"}, status_code=503)
-    if req.focus_mode not in ("mask", "overlay"):
-        return JSONResponse({"error": "focus_mode debe ser 'mask' u 'overlay'"}, status_code=400)
-    seg.confidence = req.confidence
-    seg.focus_mode = req.focus_mode
-    seg.imgsz      = req.imgsz
-    if req.enabled and (req.model != seg._model_path or seg._model is None):
-        loop = asyncio.get_event_loop()
-        ok   = await loop.run_in_executor(None, seg.load_model, req.model)
-        if not ok:
-            return JSONResponse({"error": f"No se pudo cargar {req.model}"}, status_code=500)
-    seg.enabled = req.enabled
-    return JSONResponse({"updated": True, **seg.status})
+    return JSONResponse(video.vision.config.model_dump())
+
+
+@app.post("/api/vision/config")
+async def update_vision_config(req: dict):
+    if not VIDEO_AVAILABLE or not video or not video.vision:
+        return JSONResponse({"error": "Visión no disponible"}, status_code=503)
+    try:
+        config = await video.vision.configure(req)
+        return JSONResponse({"updated": True, **config})
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=422)
+    except Exception as exc:
+        return JSONResponse({"error": f"No se pudo configurar visión: {exc}"}, status_code=503)
+
+
+@app.post("/api/segmentation/config")
+async def update_segmentation_config(req: SegmentationConfigRequest):
+    # Legacy callers select an exclusive mode too; no independent stage switches.
+    if req.focus_mode not in ('mask', 'overlay'):
+        return JSONResponse({"error": "focus_mode inválido"}, status_code=422)
+    return await update_vision_config({
+        "pipeline_mode": "segment" if req.enabled else "off",
+        "models": {"segment": req.model}, "imgsz": {"segment": req.imgsz},
+        "confidence": {"default": req.confidence}})
 
 @app.post("/api/vision/governor")
 async def update_vision_governor(req: GovernorConfigRequest):
@@ -553,29 +562,18 @@ async def get_yolo_status():
 @app.get("/api/yolo/models")
 async def list_yolo_models():
     if not VIDEO_AVAILABLE or not video or not video.yolo:
-        return JSONResponse({"custom": [], "defaults": ["yolov8n.pt", "yolov8s.pt", "yolov8m.pt"]})
-    from yolo_processor import YOLOProcessor
-    custom   = YOLOProcessor.list_local_models()
-    defaults = ["yolov8n.pt", "yolov8s.pt", "yolov8m.pt"]
+        return JSONResponse({"custom": [], "defaults": ["yolo26n.pt", "yolo26s.pt", "yolo26m.pt"]})
+    from vision_model import VisionModel
+    custom   = VisionModel.list_local_models("detect")
+    defaults = ["yolo26n.pt", "yolo26s.pt", "yolo26m.pt"]
     return JSONResponse({"custom": custom, "defaults": defaults})
 
 @app.post("/api/yolo/config")
 async def update_yolo_config(req: YOLOConfigRequest):
-    if not VIDEO_AVAILABLE or not video or not video.yolo:
-        return JSONResponse({"error": "YOLO no disponible"}, status_code=503)
-    yolo = video.yolo
-    if not yolo.is_available():
-        return JSONResponse({"error": "ultralytics no instalado — pip install ultralytics"}, status_code=503)
-    yolo.confidence = req.confidence
-    yolo.imgsz      = req.imgsz
-    # Cargar modelo si cambió o no hay ninguno cargado
-    if req.enabled and (req.model != yolo._model_path or yolo._model is None):
-        loop = asyncio.get_event_loop()
-        ok   = await loop.run_in_executor(None, yolo.load_model, req.model)
-        if not ok:
-            return JSONResponse({"error": f"No se pudo cargar {req.model}"}, status_code=500)
-    yolo.enabled = req.enabled
-    return JSONResponse({"updated": True, **yolo.status})
+    return await update_vision_config({
+        "pipeline_mode": "detect" if req.enabled else "off",
+        "models": {"detect": req.model}, "imgsz": {"detect": req.imgsz},
+        "confidence": {"default": req.confidence}})
 
 
 # ──────────────────────────────────────────────────────────────
