@@ -1,3 +1,0 @@
-python backend/elrs_backend.py \
- --port /dev/serial/by-id/usb-OpenTX_Radiomaster_TX12_Serial_Port_00000000001B-if00 \
-  --baud 115200

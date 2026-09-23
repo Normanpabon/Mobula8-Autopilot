@@ -9,7 +9,7 @@
 # Para GPU con CUDA 11.8:
 #   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
 #
-# Extras SOLO para optimización de modelos (docs/YOLO_FINETUNING.md §6),
+# Extras opcionales para optimización de modelos,
 # no necesarios para correr el servidor:
 #   pip install onnx onnxruntime    # export/inferencia ONNX
 #   pip install openvino            # cuantización INT8 en CPU Intel

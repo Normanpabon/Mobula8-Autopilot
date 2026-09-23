@@ -1,12 +1,26 @@
+> Los documentos históricos retirados de la alfa permanecen en el historial
+> de Git. El estado vigente y los criterios de aceptación están en
+> `docs/PLAN_ACCION.md`.
+
 > Las fases pendientes (Fase 3 — inyección EdgeTX, Fase 4 — vuelo autónomo)
 
-## Sin publicar — migración YOLO26
+## Sin publicar — preparación de la alfa
+
+- Retirados pesos YOLOv8 versionados, comando serial personal y resultado
+  sintético del benchmark. El benchmark activo usa solo YOLO26.
+- Configuración de visión y calibración local fuera de Git; visión en OFF en
+  una instalación nueva. Logs, pesos y artefactos de campo ignorados.
+- Documentación vigente reducida a instalación, arquitectura, visión, RC,
+  presets, plan de aceptación y roadmap. Los documentos históricos retirados
+  siguen disponibles en el historial de Git.
+
+### Migración YOLO26
 
 - Modos exclusivos OFF/DETECT/SEGMENT; cajas y máscaras en una inferencia.
 - Configuración persistente de modelos, clases, thresholds, tamaños y métricas.
 - API y panel AI unificados, preservando ROI y governor stale → HOVER.
 - Ultralytics 8.4.0, tests, smoke real y benchmark reproducible.
-- Aceptación de campo pendiente; ver `docs/YOLO26_MIGRATION_REPORT.md`.
+- Aceptación de campo pendiente; ver `docs/PLAN_ACCION.md`.
 
 > y el resto del trabajo futuro viven ahora en `docs/ROADMAP.md`.
 

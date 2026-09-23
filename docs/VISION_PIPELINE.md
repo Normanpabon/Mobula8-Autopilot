@@ -27,11 +27,11 @@ resolución, revisión ROI/configuración o con más de dos segundos de edad.
 
 ## Configuración
 
-`backend/config/vision.json` contiene defaults versionados y recibe los cambios
-persistidos desde la API. Revisar el diff antes de commitear ajustes locales.
-Modo inicial: detect; carga en el worker al iniciar captura, sin bloquear
-WebRTC. Si falla, status muestra el error y governor queda en warming_up.
-OFF permite operar sin Ultralytics. Reintentar aplicando configuración.
+`backend/config/vision.json` guarda la selección local del operador y está
+ignorado por Git. En un clon nuevo el modo inicial es OFF y permite operar
+sin Ultralytics. DETECT o SEGMENT cargan el modelo en el worker al iniciar
+captura, sin bloquear WebRTC. Si falla, status muestra el error y governor
+queda en warming_up. Reintentar aplicando configuración.
 
 ```http
 GET /api/vision/config
@@ -118,5 +118,5 @@ El smoke real descarga pesos si hacen falta y exige cajas y máscaras no vacías
 sobre el asset `bus.jpg`. CI incluye estas comprobaciones con Ultralytics 8.4.0;
 la ejecución remota de CI requiere publicar la rama. Ver
 [benchmark reproducible](../benchmarks/README.md) e
-[informe de migración](YOLO26_MIGRATION_REPORT.md). No dar por aceptada la
+[plan de aceptación](PLAN_ACCION.md). No dar por aceptada la
 calidad de campo ni la latencia con WebRTC y grabación reales hasta medirlas.

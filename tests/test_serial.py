@@ -186,6 +186,37 @@ class SerialTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual((await self.client.get('/api/serial/ports')).json()['ports'], [])
             self.assertEqual((await self.connect()).status_code, 400)
 
+    async def test_open_port_without_telemetry_is_not_live(self):
+        await self.connect()
+        state = (await self.client.get('/api/status')).json()
+        self.assertTrue(state['connected'])
+        self.assertFalse(state['telemetry_active'])
+        self.assertEqual(state['telemetry_state'], 'WAITING')
+        self.assertEqual(state['serial_bytes_received'], 0)
+
+    async def test_serial_diagnostics_distinguish_noise_crc_unknown_and_telemetry(self):
+        await self.connect()
+        def frame(frame_type, payload):
+            body = bytes([frame_type]) + payload
+            return bytes([api.CRSF_SYNC, len(body) + 1]) + body + bytes([api.crc8_dvb_s2(body)])
+        battery = frame(0x08, bytes([0, 100, 0, 10, 0, 0, 0, 80]))
+        bad_crc = battery[:-1] + bytes([battery[-1] ^ 0xFF])
+        await api.serial_data(b'no')
+        self.assertEqual((await self.client.get('/api/status')).json()['serial_sync_discarded'], 2)
+        await api.serial_data(b'ise' + bad_crc + frame(0x99, b'X') + battery)
+        state = (await self.client.get('/api/status')).json()
+        self.assertEqual(state['serial_sync_discarded'], 5)
+        self.assertEqual(state['serial_crc_errors'], 1)
+        self.assertEqual(state['serial_unknown_frames'], 1)
+        self.assertEqual(state['serial_valid_frames'], 2)
+        self.assertEqual(state['frames_received'], 1)
+        self.assertEqual(state['frames_by_type']['battery'], 1)
+        self.assertEqual(state['serial_unknown_types']['0x99'], 1)
+        self.assertEqual(state['serial_discarded_heads']['0x6E'], 1)
+        self.assertTrue(state['telemetry_active'])
+        self.assertIsNotNone(state['last_serial_byte_at'])
+        self.assertIsNotNone(state['last_telemetry_at'])
+
 
 if __name__ == '__main__':
     unittest.main()

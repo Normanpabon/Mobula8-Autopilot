@@ -211,7 +211,7 @@ class VisionPipeline:
                 await self.configure({}, persist=False)
             except Exception as exc:
                 self._error = str(exc)
-                log.error('No se pudo iniciar visión: %s', exc)
+                log.exception('No se pudo iniciar visión: %s', exc)
         while self._running:
             if not self.active or self._frame_getter is None:
                 await asyncio.sleep(0.2)
@@ -228,7 +228,7 @@ class VisionPipeline:
                 self._vision_fps = round(1.0 / dt, 1) if dt > 0 else 0.0
                 self._publish(result)
             except Exception as e:
-                log.error(f"[Vision] Error en pipeline: {e}")
+                log.exception("[Vision] Error en pipeline: %s", e)
                 await asyncio.sleep(0.5)
             # Ceder el control; el executor de 1 worker ya limita el ritmo
             await asyncio.sleep(0)

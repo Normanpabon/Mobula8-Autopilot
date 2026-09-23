@@ -39,7 +39,7 @@ class Benchmark(Settings):
     window_seconds: int = Field(default=30, ge=1, le=3600, strict=True)
 
 class VisionConfig(Settings):
-    pipeline_mode: Literal['off', 'detect', 'segment'] = 'detect'
+    pipeline_mode: Literal['off', 'detect', 'segment'] = 'off'
     models: Models = Field(default_factory=Models)
     imgsz: Sizes = Field(default_factory=Sizes)
     confidence: Confidence = Field(default_factory=Confidence)

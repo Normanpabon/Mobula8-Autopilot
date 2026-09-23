@@ -5,14 +5,21 @@ Guarda automáticamente cada sesión de vuelo en formato JSON.
 Usado por elrs_backend.py — no ejecutar directamente.
 
 Estructura de un archivo de sesión:
-    logs/session_YYYYMMDD_HHMMSS.json
+    logs/session_YYYYMMDD_HHMMSS_<id>.json
 """
 
 import json
+import logging
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
+from uuid import uuid4
+
+from app_logging import run_id, set_session_id
+
+log = logging.getLogger("session_manager")
 
 LOGS_DIR = Path(__file__).resolve().parent.parent / "logs"
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
@@ -25,11 +32,13 @@ class SessionManager:
     """
 
     def __init__(self):
-        self.session_id   = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        self.session_id   = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S") + "_" + uuid4().hex[:6]
         self.start_time   = datetime.now(timezone.utc)
         self._frames: list = []
-        print(f"[SESSION] Nueva sesión: {self.session_id}")
-        print(f"[SESSION] Logs en: {LOGS_DIR.resolve()}")
+        self._save_lock = threading.Lock()
+        self._finalized = False
+        set_session_id(self.session_id)
+        log.info("Nueva sesión id=%s dir=%s", self.session_id, LOGS_DIR.resolve())
 
     # ── Propiedades de estado ────────────────────────────────────
 
@@ -64,44 +73,48 @@ class SessionManager:
 
     # ── Guardar sesión ───────────────────────────────────────────
 
-    def save(self) -> str:
+    def save(self, finalize: bool = True) -> str:
         """
         Guarda la sesión en disco y retorna el path del archivo.
         """
-        end_time = datetime.now(timezone.utc)
-        summary  = self._build_summary(end_time)
-
-        doc = {
-            "session_id": self.session_id,
-            "start_time": self.start_time.isoformat(),
-            "end_time":   end_time.isoformat(),
-            "summary":    summary,
-            "frames":     self._frames,
-        }
-
-        path = LOGS_DIR / f"session_{self.session_id}.json"
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(doc, f, indent=2, ensure_ascii=False)
-
-        size_kb = path.stat().st_size / 1024
-        print(
-            f"[SESSION] Sesión guardada: {path.name} "
-            f"({self.current_frame_count} frames, "
-            f"{summary['duration_seconds']:.1f}s, "
-            f"{size_kb:.1f} KB)"
-        )
+        with self._save_lock:
+            path = LOGS_DIR / f"session_{self.session_id}.json"
+            if self._finalized:
+                return str(path)
+            end_time = datetime.now(timezone.utc)
+            frames = list(self._frames)
+            summary = self._build_summary(end_time, frames)
+            doc = {
+                "session_id": self.session_id,
+                "run_id": run_id(),
+                "start_time": self.start_time.isoformat(),
+                "end_time": end_time.isoformat() if finalize else None,
+                "live": not finalize,
+                "summary": summary,
+                "frames": frames,
+            }
+            temporary = path.with_suffix(".tmp")
+            with open(temporary, "w", encoding="utf-8") as f:
+                json.dump(doc, f, indent=2, ensure_ascii=False)
+            temporary.replace(path)
+            if finalize:
+                self._finalized = True
+            size_kb = path.stat().st_size / 1024
+        log.info("Sesión guardada file=%s frames=%s duration_s=%.1f size_kb=%.1f",
+                 path.name, len(doc["frames"]), summary['duration_seconds'], size_kb)
         return str(path)
 
     # ── Resumen ──────────────────────────────────────────────────
 
-    def _build_summary(self, end_time: datetime) -> dict:
+    def _build_summary(self, end_time: datetime, frames=None) -> dict:
         """Calcula métricas agregadas de todos los frames grabados."""
         duration = (end_time - self.start_time).total_seconds()
+        frames = self._frames if frames is None else frames
 
-        bat_frames  = [f for f in self._frames if f["type"] == "battery"]
-        link_frames = [f for f in self._frames if f["type"] == "link"]
-        att_frames  = [f for f in self._frames if f["type"] == "attitude"]
-        fm_frames   = [f for f in self._frames if f["type"] == "flight_mode"]
+        bat_frames  = [f for f in frames if f["type"] == "battery"]
+        link_frames = [f for f in frames if f["type"] == "link"]
+        att_frames  = [f for f in frames if f["type"] == "attitude"]
+        fm_frames   = [f for f in frames if f["type"] == "flight_mode"]
 
         # ── Batería ──
         voltages  = [f["data"].get("voltage", 0)  for f in bat_frames]
@@ -147,7 +160,7 @@ class SessionManager:
         }
 
         return {
-            "total_frames":     len(self._frames),
+            "total_frames":     len(frames),
             "duration_seconds": round(duration, 1),
             "max_voltage":      round(max_voltage,  2),
             "min_voltage":      round(min_voltage,  2),
@@ -186,7 +199,7 @@ class SessionManager:
                     "size_kb":    round(path.stat().st_size / 1024, 1),
                 })
             except Exception as e:
-                print(f"[SESSION] Error leyendo {path.name}: {e}")
+                log.exception("Error leyendo %s", path.name)
         return sessions
 
     @staticmethod
@@ -199,7 +212,7 @@ class SessionManager:
             with open(path, encoding="utf-8") as f:
                 return json.load(f)
         except Exception as e:
-            print(f"[SESSION] Error leyendo sesión {session_id}: {e}")
+            log.exception("Error leyendo sesión %s", session_id)
             return None
 
     @staticmethod
@@ -210,8 +223,8 @@ class SessionManager:
             return False
         try:
             path.unlink()
-            print(f"[SESSION] Sesión eliminada: {session_id}")
+            log.info("Sesión eliminada: %s", session_id)
             return True
         except Exception as e:
-            print(f"[SESSION] Error eliminando {session_id}: {e}")
+            log.exception("Error eliminando sesión %s", session_id)
             return False

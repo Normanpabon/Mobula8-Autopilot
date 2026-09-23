@@ -417,7 +417,7 @@ class VideoCapture:
                 self._open_configured, device_id, width, height, target_fps)
         except Exception as exc:
             self.error = str(exc)
-            log.error(self.error)
+            log.exception("No se pudo iniciar captura: %s", exc)
             return False
         self._cap = cap
         self.pixel_format = capture_fourcc(cap)
@@ -478,7 +478,7 @@ class VideoCapture:
             except Exception as exc:
                 self.error = str(exc)
                 self.is_running = False
-                log.error("Captura detenida: %s", exc)
+                log.exception("Captura detenida: %s", exc)
 
     async def get_frame(self) -> Optional[np.ndarray]:
         async with self._lock:
@@ -809,7 +809,7 @@ class VideoStreamer:
             raise
         except Exception as exc:
             self.recorder.error = str(exc)
-            log.error("Grabación: %s", exc)
+            log.exception("Grabación: %s", exc)
         finally:
             self.recorder.stop()
 

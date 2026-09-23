@@ -7,6 +7,7 @@ from vision_config import VisionConfig, CONFIG_FILE
 class ConfigTests(unittest.TestCase):
     def test_json_and_defaults(self):
         self.assertEqual(VisionConfig().models.detect, 'yolo26n.pt')
+        self.assertEqual(VisionConfig().pipeline_mode, 'off')
         self.assertEqual(VisionConfig.load(CONFIG_FILE).models.segment, 'yolo26n-seg.pt')
         self.assertEqual(VisionConfig().patched({}), VisionConfig())
     def test_profile_presets(self):
@@ -22,7 +23,7 @@ class ConfigTests(unittest.TestCase):
             with self.subTest(patch=patch), self.assertRaises(ValueError):
                 VisionConfig().patched(patch)
     def test_patch_preserves_other_mode_and_replaces_thresholds(self):
-        c = VisionConfig().patched({'imgsz':416, 'enabled_classes':['person']})
+        c = VisionConfig().patched({'pipeline_mode':'detect', 'imgsz':416, 'enabled_classes':['person']})
         self.assertEqual(c.imgsz.detect,416)
         self.assertEqual(c.imgsz.segment,416)
         c = c.patched({'confidence':{'per_class':{'person':.7}}})

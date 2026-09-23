@@ -8,12 +8,29 @@ logs/
 models/*
 !models/README.md
 !models/manifest.json
-/yolo26*.pt
+*.pt
+*.onnx
+*.engine
+
+# Configuración y calibración elegidas en cada equipo
+backend/config/vision.json
+backend/config/vision.tmp
+backend/video_config.json
+
+# Resultados locales de benchmark
+benchmarks/*.json
+benchmarks/*.mp4
+benchmarks/*.avi
+
+# Diagnósticos de campo con rutas y datos del equipo
+docs/PLAN_PRUEBA_CAMPO_*.md
 
 # Entornos
 .venv/
 venv/
 .conda/
+.env
+.env.*
 
 # Editor
 .vscode/

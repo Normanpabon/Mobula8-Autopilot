@@ -142,6 +142,7 @@ class CommandInjector:
         self.owner, self.epoch = owner, uuid.uuid4().hex
         self._channels_us = [applied[i] for i in range(1, 17)]
         self._last_cmd_ts = time.monotonic()
+        log.info("[RC] Control adquirido owner=%s", "http" if owner == "http" else "websocket")
         return self.epoch
 
     def set_channels(self, channels, owner=None, epoch=None):
@@ -154,15 +155,19 @@ class CommandInjector:
             raise ValueError("Cada comando requiere los 16 canales")
         self._channels_us = [applied[i] for i in range(1, 17)]
         self._last_cmd_ts = time.monotonic()
+        log.debug("[RC] Comando aplicado channels_us=%s", self._channels_us)
         return applied
 
     def center(self):
         self.reset()
 
     def reset(self):
+        was_owned = self.owner is not None
         self._channels_us = list(self.failsafe_us)
         self._last_cmd_ts = 0.0
         self.owner = self.epoch = None
+        if was_owned:
+            log.warning("[RC] Control revocado; canales en failsafe")
 
     def release(self, owner):
         if self.owner == owner:
@@ -260,7 +265,7 @@ class CommandInjector:
                     self.write_errors += 1
             except Exception as e:
                 self.write_errors += 1
-                log.error(f"[RC] Error escribiendo frame: {e}")
+                log.exception("[RC] Error escribiendo frame: %s", e)
                 await asyncio.sleep(0.5)
             await asyncio.sleep(period)
 

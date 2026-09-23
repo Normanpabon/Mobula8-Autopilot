@@ -32,7 +32,13 @@ async function poll() {
     const state = await request('/api/status');
     connected = state.connected;
     selectedPort = state.serial_port;
-    status.textContent = `${os} · ${connected ? `Conectado: ${state.serial_port} @ ${state.baud_rate}` : `${state.serial_state || 'DISCONNECTED'}${state.serial_port ? `: ${state.serial_port}` : ''}`}${state.serial_error ? ` · ${state.serial_error}` : ''}`;
+    const telemetry = connected
+        ? ` · ${state.telemetry_active ? 'Telemetría activa' : state.telemetry_state === 'STALE' ? 'Telemetría vencida' : 'Sin telemetría'}`
+        : '';
+    const counters = connected
+        ? ` · ${state.serial_bytes_received ?? 0} bytes · ${state.frames_received ?? 0} muestras · ${state.serial_crc_errors ?? 0} CRC erróneos`
+        : '';
+    status.textContent = `${os} · ${connected ? `Puerto abierto: ${state.serial_port} @ ${state.baud_rate}` : `${state.serial_state || 'DISCONNECTED'}${state.serial_port ? `: ${state.serial_port}` : ''}`}${telemetry}${counters}${state.serial_error ? ` · ${state.serial_error}` : ''}`;
     buttons();
     window.dispatchEvent(new CustomEvent('serial-status', { detail: state }));
     return state;

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Replay the same clip/frames for six models. Never infer accuracy from unlabelled video."""
+"""Replay the same clip/frames for YOLO26 modes. Never infer accuracy from unlabelled video."""
 import argparse
 import hashlib
 import json
@@ -14,8 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'backend'))
 from vision_config import VisionConfig
 from vision_pipeline import VisionPipeline
 
-MATRIX = [('yolov8n.pt','detect',640), ('yolov8n.pt','detect',416),
-          ('yolo26n.pt','detect',640), ('yolo26n.pt','detect',416),
+MATRIX = [('yolo26n.pt','detect',640), ('yolo26n.pt','detect',416),
           ('yolo26n-seg.pt','segment',416), ('yolo26n-seg.pt','segment',640)]
 
 def percentiles(values):

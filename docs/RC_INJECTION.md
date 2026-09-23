@@ -84,7 +84,7 @@ que es independiente de este sistema.
 modo Telem Mirror** — ese modo está documentado como espejo de *salida* de
 telemetría. Es el ítem "pendiente de validación de protocolo" del roadmap
 desde que se planeó la Fase 3. El plan de validación
-(`HARDWARE_VALIDATION.md` §4b) prueba, en orden:
+([`PLAN_ACCION.md`](PLAN_ACCION.md)) prueba, en orden:
 
 1. Frames con dirección `0xEE` (módulo transmisor) — default del injector.
 2. `0xEA` (radio) y `0xC8` (FC) — el `sync_byte` es configurable por API
@@ -112,7 +112,7 @@ protocolo, recuperación de mando y seguridad con hardware siguen pendientes.
    la radio reacciona (pantalla de canales / mixer) a los frames inyectados.
 2. Segunda prueba con el Mobula8 **sin hélices**.
 3. Nunca habilitar la inyección con el drone armado y con hélices hasta que
-   el deadman esté validado en runtime (checklist §4b).
+   el deadman esté validado en banco (ver `PLAN_ACCION.md`).
 4. El panel RC de la UI muestra el estado del deadman en vivo
    (`OFF` / `FAILSAFE` / `LIVE`) y el contador de frames enviados.
 

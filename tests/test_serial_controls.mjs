@@ -44,6 +44,11 @@ test('serial selector connects, exposes retry state and allows cancelling retrie
     assert.equal(JSON.parse(calls.find(([url]) => url.endsWith('/connect'))[1].body).port, 'COM12');
     assert.match(elements.get('serialStatus').textContent, /Windows.*RETRY_WAIT/);
     assert.equal(elements.get('serialDisconnect').disabled, false);
+    state = {connected: true, serial_port: 'COM12', baud_rate: 115200,
+        telemetry_active: false, telemetry_state: 'WAITING', serial_bytes_received: 0, frames_received: 0};
+    tick();
+    await flush();
+    assert.match(elements.get('serialStatus').textContent, /Puerto abierto.*Sin telemetría/);
     await elements.get('serialDisconnect').listeners.click();
     assert.equal(elements.get('serialDisconnect').disabled, true);
     tick();

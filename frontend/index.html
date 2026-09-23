@@ -505,6 +505,7 @@
                 onStateChange: updateVideoUI,
                 onError: (msg) => {
                     console.error('[VideoPlayer]', msg);
+                    window.reportClientEvent?.('error', `VideoPlayer: ${msg}`);
                     document.getElementById('videoNotice').textContent = msg;
                 },
             });

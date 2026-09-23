@@ -7,15 +7,39 @@ import { TelemetryManager } from './modules/TelemetryManager.js';
 import { HorizonCanvas } from './modules/HorizonCanvas.js';
 import { formatTime } from './modules/Utils.js';
 
+const lastClientEvents = new Map();
+let clientLoggingEnabled = true;
+function reportClientEvent(level, message) {
+    if (!clientLoggingEnabled) return;
+    const key = `${level}:${message}`;
+    const now = Date.now();
+    if (now - (lastClientEvents.get(key) || 0) < 10000) return;
+    if (lastClientEvents.size > 100) lastClientEvents.clear();
+    lastClientEvents.set(key, now);
+    fetch('/api/client/events', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({level, message: String(message).slice(0, 2000)}),
+        keepalive: true,
+    }).catch(() => {});
+}
+window.reportClientEvent = reportClientEvent;
+window.addEventListener('error', (event) => {
+    reportClientEvent('error', `Browser error: ${event.message} @ ${event.filename}:${event.lineno}:${event.colno}`);
+});
+window.addEventListener('unhandledrejection', (event) => {
+    reportClientEvent('error', `Unhandled rejection: ${event.reason?.stack || event.reason}`);
+});
+
 // ─── Global State ───
 let ws = null;
 let telemetry = null;
 let horizon = null;
 let reconnectTimeout = null;
-let serialConnected = false;
+let telemetryActive = false;
 window.addEventListener('serial-status', ({ detail }) => {
-    serialConnected = detail.connected;
-    updateConnectionStatus(ws?.readyState === WebSocket.OPEN && serialConnected ? 'connected' : 'disconnected');
+    telemetryActive = Boolean(detail.telemetry_active);
+    if (detail.app_log_level) clientLoggingEnabled = detail.app_log_level !== 'OFF';
+    updateConnectionStatus(ws?.readyState === WebSocket.OPEN && telemetryActive ? 'connected' : 'disconnected');
 });
 
 // ─── DOM Elements ───
@@ -72,7 +96,7 @@ function connectWebSocket() {
 
 function handleWebSocketOpen() {
     console.log('[WS] Connected');
-    updateConnectionStatus(serialConnected ? 'connected' : 'disconnected');
+    updateConnectionStatus(telemetryActive ? 'connected' : 'disconnected');
     addLog('WebSocket connected', 'success');
     
     // Clear reconnect timeout
@@ -88,6 +112,8 @@ function handleWebSocketMessage(event) {
         
         // Update telemetry state
         telemetry.update(frame.type, frame.data);
+        telemetryActive = true;
+        updateConnectionStatus('connected');
         
         // Log important events
         if (frame.type === 'flight_mode') {
@@ -96,6 +122,7 @@ function handleWebSocketMessage(event) {
         
     } catch (error) {
         console.error('[WS] Message parse error:', error);
+        reportClientEvent('error', `WebSocket message error: ${error}`);
     }
 }
 
@@ -227,6 +254,7 @@ function addLog(message, level = 'info') {
     }
     
     renderLogs();
+    reportClientEvent(level === 'success' ? 'info' : level, message);
 }
 
 function renderLogs() {
